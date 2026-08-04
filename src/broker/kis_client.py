@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import time
 import uuid
 from contextlib import contextmanager
@@ -30,6 +31,18 @@ log = logging.getLogger(__name__)
 
 BASE_URL_PROD = "https://openapi.koreainvestment.com:9443"
 BASE_URL_PAPER = "https://openapivts.koreainvestment.com:29443"
+
+
+# 일시적 '초당 거래건수 초과' 재시도 정책 (wiki: timeouts-and-retries rule 4 / 429 행).
+RATE_LIMIT_MARKER = "초당 거래건수"
+RATE_LIMIT_MAX_ATTEMPTS = 3   # 총 시도 횟수 (2~3회 예산)
+RATE_LIMIT_BASE_SEC = 0.5
+RATE_LIMIT_CAP_SEC = 4.0
+
+
+def _rate_limit_backoff(attempt: int, rand=random.random) -> float:
+    """Full jitter: random(0, min(cap, base * 2**attempt))."""
+    return rand() * min(RATE_LIMIT_CAP_SEC, RATE_LIMIT_BASE_SEC * 2 ** attempt)
 
 
 def _base_url(mode: str) -> str:
@@ -189,6 +202,9 @@ class KisClient:
         if self._token and time.time() < self._expires_at:
             return self._token
         log.info("KIS OAuth 토큰 신규 발급 시도...")
+        # 토큰 POST 도 초당 거래건수에 포함된다 — 다른 호출과 동일하게 간격을 두고
+        # _last_request_at 을 갱신해 뒤따르는 API 호출이 같은 초에 겹치지 않게 한다.
+        self._throttle()
         r = requests.post(
             f"{self.base_url}/oauth2/tokenP",
             json={
@@ -231,10 +247,13 @@ class KisClient:
         self._last_request_at = time.monotonic()
 
     def _headers(self, tr_id: str) -> dict:
+        # 토큰을 먼저 해결한다. 발급이 일어나면 그 POST 가 _throttle() 을 거치므로
+        # 아래 _throttle() 이 이번 API 호출을 토큰 POST 로부터 띄운다.
+        token = self._get_token()
         self._throttle()
         return {
             "Content-Type": "application/json; charset=UTF-8",
-            "authorization": f"Bearer {self._get_token()}",
+            "authorization": f"Bearer {token}",
             "appkey": self.app_key,
             "appsecret": self.app_secret,
             "tr_id": tr_id,
@@ -245,8 +264,13 @@ class KisClient:
     # 잔고 조회
     # --------------------------------------------------------
 
-    def get_balance(self) -> Balance | None:
-        """모의: VTTC8434R / 실전: TTTC8434R."""
+    def get_balance(self, *, sleep=time.sleep, rand=random.random) -> Balance | None:
+        """모의: VTTC8434R / 실전: TTTC8434R.
+
+        일시적 '초당 거래건수 초과'는 full jitter 백오프로 최대
+        RATE_LIMIT_MAX_ATTEMPTS 회까지 재시도한다. 그 외 rt_cd != "0" 과
+        네트워크 오류는 즉시 None (재시도 대상이 아니다).
+        """
         tr_id = "VTTC8434R" if self.mode == "paper" else "TTTC8434R"
         params = {
             "CANO": self.cano,
@@ -261,37 +285,45 @@ class KisClient:
             "CTX_AREA_FK100": "",
             "CTX_AREA_NK100": "",
         }
-        try:
-            r = requests.get(
-                f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-balance",
-                headers=self._headers(tr_id),
-                params=params,
-                timeout=10,
-            )
-            data = r.json()
-            if data.get("rt_cd") != "0":
-                log.warning("get_balance 실패: %s %s", data.get("rt_cd"), data.get("msg1"))
+        for attempt in range(RATE_LIMIT_MAX_ATTEMPTS):
+            try:
+                r = requests.get(
+                    f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-balance",
+                    headers=self._headers(tr_id),
+                    params=params,
+                    timeout=10,
+                )
+                data = r.json()
+                if data.get("rt_cd") != "0":
+                    msg = data.get("msg1") or ""
+                    if RATE_LIMIT_MARKER in msg and attempt < RATE_LIMIT_MAX_ATTEMPTS - 1:
+                        wait = _rate_limit_backoff(attempt, rand=rand)
+                        log.info("get_balance rate limit → %.2fs 후 재시도 (%d/%d)",
+                                 wait, attempt + 2, RATE_LIMIT_MAX_ATTEMPTS)
+                        sleep(wait)
+                        continue
+                    log.warning("get_balance 실패: %s %s", data.get("rt_cd"), msg)
+                    return None
+                output1 = data.get("output1", [])  # 보유종목 array
+                output2 = data.get("output2", [])  # 계좌요약 array (single)
+                summary = output2[0] if output2 else {}
+                return Balance(
+                    cash=int(summary.get("prvs_rcdl_excc_amt", 0) or 0),  # 가수도정산금액 (출금가능)
+                    total_eval=int(summary.get("tot_evlu_amt", 0) or 0),  # 총평가금액
+                    positions=[{
+                        "ticker": p.get("pdno"),
+                        "name": p.get("prdt_name"),
+                        "qty": int(p.get("hldg_qty", 0) or 0),
+                        "avg_price": int(float(p.get("pchs_avg_pric", 0) or 0)),
+                        "current_price": int(p.get("prpr", 0) or 0),
+                        "eval_amt": int(p.get("evlu_amt", 0) or 0),
+                        "pnl_pct": float(p.get("evlu_pfls_rt", 0) or 0),
+                    } for p in output1],
+                    raw=data,
+                )
+            except requests.RequestException as e:
+                log.warning("get_balance 네트워크 오류: %s", e)
                 return None
-            output1 = data.get("output1", [])  # 보유종목 array
-            output2 = data.get("output2", [])  # 계좌요약 array (single)
-            summary = output2[0] if output2 else {}
-            return Balance(
-                cash=int(summary.get("prvs_rcdl_excc_amt", 0) or 0),  # 가수도정산금액 (출금가능)
-                total_eval=int(summary.get("tot_evlu_amt", 0) or 0),  # 총평가금액
-                positions=[{
-                    "ticker": p.get("pdno"),
-                    "name": p.get("prdt_name"),
-                    "qty": int(p.get("hldg_qty", 0) or 0),
-                    "avg_price": int(float(p.get("pchs_avg_pric", 0) or 0)),
-                    "current_price": int(p.get("prpr", 0) or 0),
-                    "eval_amt": int(p.get("evlu_amt", 0) or 0),
-                    "pnl_pct": float(p.get("evlu_pfls_rt", 0) or 0),
-                } for p in output1],
-                raw=data,
-            )
-        except requests.RequestException as e:
-            log.warning("get_balance 네트워크 오류: %s", e)
-            return None
 
     def get_overseas_balance(self, exchange: str = "NASD", currency: str = "USD") -> Balance | None:
         """해외주식 잔고 조회. 모의: VTTS3012R / 실전: TTTS3012R."""
