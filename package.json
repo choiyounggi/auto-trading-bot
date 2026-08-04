@@ -1,0 +1,58 @@
+{
+  "name": "@younggichoi/kis-trader",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "macOS CLI for a local LLM-driven Korea Investment (KIS) auto-trading engine — onboarding, Telegram, launchd jobs, doctor.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/choiyounggi/auto-trading-bot.git"
+  },
+  "homepage": "https://github.com/choiyounggi/auto-trading-bot#readme",
+  "bugs": "https://github.com/choiyounggi/auto-trading-bot/issues",
+  "keywords": [
+    "kis",
+    "한국투자증권",
+    "trading",
+    "auto-trading",
+    "stock",
+    "telegram",
+    "claude-code",
+    "codex",
+    "llm",
+    "launchd",
+    "cli"
+  ],
+  "bin": {
+    "kis-trader": "dist/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "os": [
+    "darwin"
+  ],
+  "files": [
+    "dist/",
+    "src/",
+    "config/",
+    "schemas/",
+    "data/migrations/",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.test.json && node --test \"dist-test/**/*.test.js\"",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0"
+  }
+}
