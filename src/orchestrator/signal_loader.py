@@ -3,12 +3,35 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+from collections.abc import Mapping
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import jsonschema
 
 log = logging.getLogger(__name__)
+
+SIGNAL_DIR_ENV = "KIS_TRADER_SIGNAL_DIR"
+DEFAULT_SIGNAL_DIR = Path.home() / "stock-signal-bot" / "data" / "signals"
+
+
+def resolve_signal_dir(env: Mapping[str, str] | None = None) -> Path:
+    """KIS_TRADER_SIGNAL_DIR 우선, 미설정 시 기존 기본 경로.
+
+    - 미설정 / 빈 문자열 / 공백만 → DEFAULT_SIGNAL_DIR 폴백
+    - '~' 확장
+    - 상대 경로는 ValueError — launchd 작업 디렉토리 기준으로 해석돼
+      조용히 아무것도 못 찾는다.
+    """
+    value = (env if env is not None else os.environ).get(SIGNAL_DIR_ENV)
+    if value is None or not value.strip():
+        return DEFAULT_SIGNAL_DIR
+
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"{SIGNAL_DIR_ENV} must be an absolute path: {value}")
+    return path
 
 
 def load_signal(
