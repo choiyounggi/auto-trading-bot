@@ -5,6 +5,7 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
 import {
+  JOB_KEYS,
   configHome,
   parseConfig,
   loadConfig,
@@ -57,6 +58,7 @@ test("omitting llmAgent and jobs applies the documented defaults", () => {
     monitor: true,
     reconciler: true,
     dipBuy: true,
+    usOrchestrator: true,
   });
 });
 
@@ -92,6 +94,11 @@ test("an invalid llmAgent reports the exact allowed-values message", () => {
 test("a non-boolean job value is rejected by name", () => {
   const errs = errorsOf({ ...validRaw(), jobs: { monitor: "yes" } });
   assert.ok(errs.includes("jobs.monitor must be a boolean"), errs.join("; "));
+  // The key added last is the one most likely to miss the JOB_KEYS-driven loop,
+  // so it is asserted exactly: one error, named, and nothing else.
+  assert.deepEqual(errorsOf({ ...validRaw(), jobs: { usOrchestrator: "yes" } }), [
+    "jobs.usOrchestrator must be a boolean",
+  ]);
 });
 
 test("loadConfig on a directory with no config.json points the user at init", () => {
@@ -175,7 +182,13 @@ test("saveConfig writes mode 0600 and round-trips through loadConfig", () => {
       pythonPath: "/usr/bin/python3.11",
       signalDir: "/opt/signals",
       llmAgent: "pi",
-      jobs: { orchestrator: true, monitor: false, reconciler: true, dipBuy: false },
+      jobs: {
+        orchestrator: true,
+        monitor: false,
+        reconciler: true,
+        dipBuy: false,
+        usOrchestrator: false,
+      },
     };
     const p = saveConfig(cfg, dir);
     assert.equal(statSync(p).mode & 0o777, 0o600);
@@ -216,4 +229,36 @@ test("partially specified jobs default the unlisted keys to true", () => {
   assert.equal(r.value.jobs.orchestrator, true);
   assert.equal(r.value.jobs.reconciler, true);
   assert.equal(r.value.jobs.dipBuy, true);
+  assert.equal(r.value.jobs.usOrchestrator, true);
+
+  // Same rule from the other side: opting the new key out must not disturb the
+  // four that were already there.
+  const off = parseConfig({ ...validRaw(), jobs: { usOrchestrator: false } });
+  assert.equal(off.ok, true);
+  if (!off.ok) return;
+  assert.deepEqual(off.value.jobs, {
+    orchestrator: true,
+    monitor: true,
+    reconciler: true,
+    dipBuy: true,
+    usOrchestrator: false,
+  });
+});
+
+test("JOB_KEYS is the whole five-job inventory, in declared order", () => {
+  assert.equal(JOB_KEYS.length, 5, `JOB_KEYS drifted: ${JOB_KEYS.join(", ")}`);
+  assert.ok(JOB_KEYS.includes("usOrchestrator"), JOB_KEYS.join(", "));
+  assert.deepEqual([...JOB_KEYS], [
+    "orchestrator",
+    "monitor",
+    "reconciler",
+    "dipBuy",
+    "usOrchestrator",
+  ]);
+  // Every key the parser defaults must come from JOB_KEYS and vice versa —
+  // a key present in one but not the other is the 4-vs-5 defect this guards.
+  const r = parseConfig(validRaw());
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.deepEqual(Object.keys(r.value.jobs).sort(), [...JOB_KEYS].sort());
 });
