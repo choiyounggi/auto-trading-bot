@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.choeyeonggi.sysctl-tweaks</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/sbin/sysctl</string>
+    <string>-w</string>
+    <string>net.inet.ip.portrange.first=32768</string>
+    <string>net.inet.tcp.msl=1000</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/var/log/choeyeonggi-sysctl-tweaks.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/choeyeonggi-sysctl-tweaks.err.log</string>
+</dict>
+</plist>

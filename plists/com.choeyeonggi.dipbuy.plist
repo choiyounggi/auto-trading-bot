@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.choeyeonggi.dipbuy</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/choeyeong-gi/stock-trader/.venv/bin/python</string>
+    <string>-m</string>
+    <string>src.orchestrator</string>
+    <string>--dip-only</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/choeyeong-gi/stock-trader</string>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+  <key>StandardOutPath</key>
+  <string>/Users/choeyeong-gi/stock-trader/data/logs/dipbuy.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/choeyeong-gi/stock-trader/data/logs/dipbuy.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>LANG</key><string>ko_KR.UTF-8</string>
+    <key>KIS_MODE</key><string>paper</string>
+    <key>KIS_ENABLE_TRADING</key><string>true</string>
+  </dict>
+</dict>
+</plist>

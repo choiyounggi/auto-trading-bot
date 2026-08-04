@@ -1,0 +1,151 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "stock-signal-bot signal JSON (v1)",
+  "type": "object",
+  "required": ["schema_version", "date", "generated_at", "buys", "macro"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "date": { "type": "string", "format": "date" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "buys": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/signalEntry" }
+    },
+    "cautions": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/signalEntry" }
+    },
+    "strategy_signals": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/strategySignal" }
+    },
+    "fundamentals": { "type": "object" },
+    "macro": {
+      "type": "object",
+      "required": ["indices"],
+      "properties": {
+        "indices": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/macroIndex" }
+        },
+        "headlines": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/newsItem" }
+        }
+      }
+    },
+    "naver": {
+      "type": "object",
+      "properties": {
+        "kospi_quote":  { "type": ["object", "null"] },
+        "kosdaq_quote": { "type": ["object", "null"] },
+        "kospi_flow":   { "type": ["object", "null"] },
+        "kosdaq_flow":  { "type": ["object", "null"] },
+        "headlines":    { "type": "array" }
+      }
+    }
+  },
+  "definitions": {
+    "signalEntry": {
+      "type": "object",
+      "required": ["ticker", "name", "score", "triggers"],
+      "properties": {
+        "ticker": { "type": "string", "pattern": "^([0-9]{6}|[A-Z0-9.:-]{1,24})$" },
+        "name": { "type": "string" },
+        "asset_class": { "type": "string" },
+        "market": { "type": "string" },
+        "exchange": { "type": "string" },
+        "quote_exchange": { "type": "string" },
+        "broker_symbol": { "type": "string" },
+        "currency": { "type": "string" },
+        "price_scale": { "type": "integer" },
+        "score": { "type": "integer" },
+        "triggers": { "type": "array", "items": { "type": "string" } },
+        "panel_summary": { "$ref": "#/definitions/panelSummary" },
+        "short_balance": { "$ref": "#/definitions/shortBalance" },
+        "llm_analysis": { "$ref": "#/definitions/llmAnalysis" }
+      }
+    },
+    "strategySignal": {
+      "type": "object",
+      "required": ["ticker", "name", "strategy_id", "strategy_score", "triggers"],
+      "properties": {
+        "ticker": { "type": "string", "pattern": "^([0-9]{6}|[A-Z0-9.:-]{1,24})$" },
+        "name": { "type": "string" },
+        "asset_class": { "type": "string" },
+        "market": { "type": "string" },
+        "exchange": { "type": "string" },
+        "quote_exchange": { "type": "string" },
+        "broker_symbol": { "type": "string" },
+        "currency": { "type": "string" },
+        "price_scale": { "type": "integer" },
+        "strategy_id": { "type": "string" },
+        "strategy_version": { "type": "string" },
+        "strategy_score": { "type": "integer" },
+        "triggers": { "type": "array", "items": { "type": "string" } },
+        "features": { "type": "object" },
+        "eligible": { "type": "boolean" },
+        "filter_reasons": { "type": "array", "items": { "type": "string" } },
+        "panel_summary": { "$ref": "#/definitions/panelSummary" },
+        "short_balance": { "$ref": "#/definitions/shortBalance" }
+      }
+    },
+    "panelSummary": {
+      "type": "object",
+      "properties": {
+        "last_close": { "type": "integer" },
+        "d_change_pct": { "type": "number" },
+        "vol_ratio_5d": { "type": "number" },
+        "foreign_net_5d_won": { "type": "integer" },
+        "inst_net_5d_won": { "type": "integer" },
+        "atr20": { "type": "number" },
+        "atr20_pct": { "type": "number" },
+        "donchian_high_20": { "type": "number" },
+        "donchian_low_10": { "type": "number" },
+        "ma200": { "type": "number" },
+        "ma200_slope_pct": { "type": "number" }
+      }
+    },
+    "shortBalance": {
+      "type": ["object", "null"],
+      "properties": {
+        "ticker": { "type": "string" },
+        "latest_pct": { "type": "number" },
+        "pct_5d_change": { "type": "number" },
+        "pct_20d_change": { "type": "number" },
+        "latest_date": { "type": "string" },
+        "days_lag": { "type": "integer" }
+      }
+    },
+    "llmAnalysis": {
+      "type": ["object", "null"],
+      "properties": {
+        "source": { "type": "string", "enum": ["claude", "pi", "unavailable"] },
+        "text": { "type": "string" },
+        "length": { "type": "integer" }
+      }
+    },
+    "macroIndex": {
+      "type": "object",
+      "required": ["label", "symbol", "close"],
+      "properties": {
+        "label": { "type": "string" },
+        "symbol": { "type": "string" },
+        "close": { "type": "number" },
+        "d_change_pct": { "type": "number" },
+        "w_change_pct": { "type": "number" },
+        "rows": { "type": "integer" }
+      }
+    },
+    "newsItem": {
+      "type": "object",
+      "required": ["title"],
+      "properties": {
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "age": { "type": "string" },
+        "url": { "type": "string" }
+      }
+    }
+  }
+}

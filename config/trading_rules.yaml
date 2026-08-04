@@ -1,0 +1,233 @@
+# config/trading_rules.yaml — 운영 파라미터
+# [공격적 모드 — paper 거래 활발화, 2026-06-29 적용]
+# 보수 원본은 trading_rules.yaml.bak-conservative 에 보존.
+# 변경 시 git commit + 1주일 cooldown 후 실거래 반영 (Risk R11).
+
+# ============================================================
+# 가드레일 — LLM 출력 clamp 임계값
+# ============================================================
+guardrails:
+  # 비중 — [사이징 확대 2026-07-06] 종목당 30~45만원이 너무 소액이라 표준 상향
+  # (영기 확정: 종목당 150~300만원 목표, 시드 3,000만 기준)
+  max_size_pct: 10.0       # [사이징 확대] 3.0 → 10.0 (~300만원)
+  min_size_pct: 3.0        # [사이징 확대] 0.5 → 3.0 — BUY면 최소 ~90만원 (clamp가 하한 승격)
+
+  # 손절 — ATR 기반 동적, clamp 범위
+  min_stop_loss_pct: 1.5
+  max_stop_loss_pct: 3.0
+
+  # 익절 — ATR×1.5 기본, clamp 범위
+  min_take_profit_pct: 2.0
+  max_take_profit_pct: 10.0
+
+  # 보유 / 동시성
+  max_hold_days: 5
+  max_position_count: 12   # [공격적] 5 → 12 (동시 보유 확대)
+  max_daily_entries: 8     # [공격적] 2 → 8 (일일 신규 진입 확대)
+
+  # 신뢰도 임계 — [공격적] 8 → 5 (config + prompt 동시 완화해야 실효)
+  min_confidence: 5
+  entry_min_confidence: 5
+  close_now_min_confidence: 5
+
+  # Anti-loop
+  max_tp_raises: 3
+
+  # 계좌 리스크 — 초기 손절까지 허용 손실률
+  # [사이징 확대 2026-07-06] 0.25 → 0.5: SL 2.5% 기준 포지션 상한 ~20%라
+  # size_pct(10%)가 지배하도록. 0.25로 두면 SL 3% 후보가 8.3%에서 잘림.
+  risk_per_trade_pct: 0.5
+
+# ============================================================
+# 부분 익절 — TP 1차 도달 시 일부 매도로 실익 확보 (2026-07-06 신설)
+# 잔여분: TP를 measured-move로 연장(tp + (tp-entry)×extension),
+# 손절가는 본전(진입가)으로 상향 → 잔여분 최악 케이스도 거래 전체는 순이익.
+# 포지션당 1회 — 연장 TP 재도달 시 잔여 전량 청산. 1주 포지션은 전량 익절.
+# ============================================================
+take_profit_partial:
+  enabled: true
+  sell_pct: 50        # 1차 도달 시 매도 비율 (%)
+  extension: 0.5      # 잔여 TP 연장 배수
+  breakeven_stop: true
+
+# ============================================================
+# Kill Switch — [공격적] 테스트 중단 최소화로 완화
+# ============================================================
+kill_switch:
+  daily_loss_pct: 8.0         # [공격적] 2.0 → 8.0
+  weekly_loss_pct: 15.0       # [공격적] 5.0 → 15.0
+  consecutive_stop_loss: 12   # [공격적] 5 → 12
+  llm_parse_fail_rate: 0.50
+  mcp_silence_min: 30
+
+# ============================================================
+# 진입 — 타이밍 + 우선순위
+# ============================================================
+entry:
+  default_strategy: MARKET_OPEN
+  after_hours_allowed: true
+  signal_score_min: 3             # [공격적] 5 → 3 (후보 확대)
+
+# ============================================================
+# Strategy Budgets — [공격적] 전략당 일일 진입 1 → 2
+# ============================================================
+strategy_budgets:
+  flow_momentum:
+    enabled: true
+    max_daily_entries: 2
+    max_hold_days: 5
+  price_momentum:
+    enabled: true
+    max_daily_entries: 2
+    max_hold_days: 5
+  short_cover:
+    enabled: true
+    max_daily_entries: 2
+    max_hold_days: 3
+  turtle_breakout:
+    enabled: true
+    max_daily_entries: 2
+    max_hold_days: 15
+  us_breakout_55:
+    enabled: true
+    max_daily_entries: 2
+    max_hold_days: 20
+  us_breakout_20:
+    enabled: true
+    max_daily_entries: 2
+    max_hold_days: 10
+  us_relative_momentum:
+    enabled: true
+    max_daily_entries: 2
+    max_hold_days: 10
+  value_quality:
+    enabled: true
+    mode: filter_only
+
+# ============================================================
+# 모니터 — 동적 조정 주기
+# ============================================================
+monitor:
+  interval_min: 30
+  regular_session_start: "09:00"
+  regular_session_end: "15:30"
+  trailing_atr_multiplier: 1.5
+  enforce_at_close: true
+
+# ============================================================
+# LLM — CLI 모드
+# ============================================================
+llm:
+  mode: cli
+  claude_bin: /opt/homebrew/bin/claude
+  pi_bin: /opt/homebrew/bin/pi
+
+  entry_self_consistency: 1        # [공격적] 3 → 1 (1표면 BUY, 다수결 미달 차단 제거)
+  monitor_self_consistency: 1
+
+  timeout_sec_entry: 180
+  timeout_sec_monitor: 90
+
+  json_parse_retries: 3
+
+# ============================================================
+# Watchlist — 진입 후보 종목
+# ============================================================
+watchlist:
+  source: ~/stock-signal-bot/config/watchlist.txt
+  exclude:
+    - "028300"  # HLB (임상 종목 — 거래정지 위험)
+  min_market_cap_eok: 5000
+
+# ============================================================
+# Universe Filter — 절대 차단 조건 (안전상 유지)
+# ============================================================
+universe_filter:
+  reject_managed: true
+  reject_warning: true
+  reject_suspended: true
+  reject_etn: true
+  reject_elw: true
+
+# ============================================================
+# Market Regime — [공격적] 사실상 OFF (약세장에도 매수 허용)
+# 극단값으로 두어 게이트가 트리거되지 않게 함. 코드 변경 없이 비활성.
+# ============================================================
+market_regime:
+  block_if_kospi_5d_pct_below: -100.0    # [공격적] -2.0 → -100.0 (비활성)
+  block_if_kosdaq_5d_pct_below: -100.0   # [공격적] -3.0 → -100.0 (비활성)
+  block_if_vix_above: 999.0              # [공격적] 25.0 → 999.0 (비활성)
+  block_if_kospi_1d_pct_below: -100.0    # [공격적] -2.0 → -100.0 (비활성)
+
+# ============================================================
+# 데이터 소스
+# ============================================================
+data:
+  signal_dir: ~/stock-signal-bot/data/signals
+  trades_db: ~/stock-trader/data/trades.sqlite
+  signal_max_age_min: 60
+
+# ============================================================
+# 알림
+# ============================================================
+notify:
+  telegram_bot_account: stock-trader
+  log_levels:
+    critical: true
+    warning: true
+    info: true
+    daily: true
+    debug: false
+
+# ============================================================
+# 자본 — Phase 별
+# ============================================================
+capital:
+  phase: 3
+  paper_capital_won: 30_000_000
+  real_capital_won: 0
+
+# ============================================================
+# 해외주식 — KIS paper 해외주식 주문 경로
+# ============================================================
+overseas:
+  enabled: true
+  paper_capital_usd: 10_000
+  max_size_pct: 3.0          # [공격적] 5.0 → 3.0 (국내와 일관, 분산)
+  risk_per_trade_pct: 0.25
+
+# ============================================================
+# Paper Probe — [공격적] 일반 문턱(5)이 낮아 probe 역할 축소되나 유지
+# ============================================================
+paper_probe:
+  enabled: true
+  min_confidence: 5.0        # [공격적] 7.5 → 5.0 (일반 문턱과 정렬)
+  max_size_pct: 1.0
+  strategies:
+    - turtle_breakout
+  asset_classes:
+    - overseas_stock
+
+# ============================================================
+# 지수 ETF 단계적 줄줗 (dip-buy) — 2026-06-29
+# 코스피/코스닥이 많이 빠지면 차단이 아니라 단계별로 지수 ETF를 매수(역발상).
+# 수급 신호와 무관한 독립 경로. 해외(overseas_stock) 잡에선 미동작.
+# ============================================================
+dip_buy:
+  enabled: true
+  window_days: 5
+  index_etf:
+    kospi: "069500"     # KODEX 200
+    kosdaq: "229200"    # KODEX 코스닥150
+  tranches:
+    # [사이징 확대 2026-07-06] 2/3/5 → 5/7.5/10 (트랜치당 150~300만원)
+    - drop_pct: -3.0
+      size_pct: 5.0
+    - drop_pct: -6.0
+      size_pct: 7.5
+    - drop_pct: -10.0
+      size_pct: 10.0
+  max_total_exposure_pct: 25.0   # [사이징 확대] 15 → 25 (트랜치 합산 상향분 반영)
+  stop_loss_pct: 8.0
+  take_profit_pct: 5.0
+  max_hold_days: 20

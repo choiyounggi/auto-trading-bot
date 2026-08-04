@@ -1,0 +1,35 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 데이터 / 로그 — git 추적 금지
+data/trades.sqlite
+data/trades.sqlite-journal
+data/trades.sqlite-wal
+data/trades.sqlite-shm
+data/logs/
+data/backups/
+data/signals/
+
+# 비밀
+.env
+*.env.local
+KILL_SWITCH
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# 과거 버전 백업 파일 — git 히스토리로 대체
+*.bak
+*.bak-*
+*.bak.*
