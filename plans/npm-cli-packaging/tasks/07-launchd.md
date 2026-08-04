@@ -16,8 +16,9 @@ by observing `launchctl list`, and removable again.
   systemd services" row (daemon-spawned jobs get a minimal PATH and no rc files).
 
 ## Inputs
-- `cli/config.ts` from task 03 — `Config` type (`projectDir`, `pythonPath`,
-  `signalDir`, `mode`, `jobs`).
+- `cli/config.ts` from tasks 03 + 03b — `Config` type (`projectDir`,
+  `pythonPath`, `signalDir`, `mode`, `jobs`), plus `JOB_KEYS` / `JobName`,
+  which task 03b has already widened to five entries including `usOrchestrator`.
 - The schedules to preserve, read off the currently-installed jobs:
   | job key | module invocation | schedule |
   |---------|-------------------|----------|
@@ -31,9 +32,15 @@ by observing `launchctl list`, and removable again.
 
 ## Steps
 1. Create `cli/launchd.ts`.
-2. `export type JobKey = "orchestrator" | "monitor" | "reconciler" | "dipBuy" | "usOrchestrator";`
-   and `export const JOBS: Record<JobKey, { args: string[]; schedule: { hour: number; minute: number } | { intervalSec: number }; log: string }>`
+2. **Do not declare a second job-name union.** Import the one that already
+   exists: `import { JOB_KEYS, type JobName } from "./config.js"` and
+   `export type JobKey = JobName;` (re-exported so callers may use either name).
+   Task 03b has already widened `JOB_KEYS` to the five entries in the table
+   above; a locally-declared union would silently drift from `Config.jobs`.
+   Then `export const JOBS: Record<JobKey, { args: string[]; schedule: { hour: number; minute: number } | { intervalSec: number }; log: string }>`
    built from the table above. `log` is the basename, e.g. `orchestrator.log`.
+   Add a test asserting `Object.keys(JOBS).sort()` deep-equals
+   `[...JOB_KEYS].sort()`, so the table and the config inventory cannot diverge.
 3. `export function labelFor(job: JobKey, username = userInfo().username): string`
    → `com.<username>.kistrader.<job>`.
 4. `export function plistPath(label: string): string` →
