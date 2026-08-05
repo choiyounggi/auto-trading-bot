@@ -353,7 +353,7 @@ test("choose accepts a single-option list", async () => {
 test("kisAccount10 rejects nine and eleven digits", () => {
   const msg = "KIS account must be exactly 10 digits (8-digit CANO + 2-digit product code).";
   assert.equal(validators.kisAccount10("123456789"), msg);
-  assert.equal(validators.kisAccount10("12345678901"), msg);
+  assert.equal(validators.kisAccount10("12345678902"), msg);
   assert.equal(validators.kisAccount10(""), msg);
 });
 

@@ -79,7 +79,7 @@ echoing it, and refuses to pretend it hid anything when stdin is not a TTY.
     **and** the captured output contains `"not a TTY"` — the warning is
     mandatory, not optional.
   - boundary: `validators.kisAccount10("123456789")` (9 digits) and
-    `"12345678901"` (11 digits) both return the error message.
+    `"12345678902"` (11 digits) both return the error message.
   - boundary: `validators.telegramChatId("-1001234567")` returns `null`
     (negative group ids are valid) while `"123"` returns the error.
   - boundary: `askDefault` with an answer of `"   "` (whitespace only) returns
