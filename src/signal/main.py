@@ -16,7 +16,6 @@ from typing import Iterable
 
 import pandas as pd
 import yaml
-from dotenv import load_dotenv
 
 from src.signal.analysis.flow_analyzer import (
     analyze_ticker_flow,
@@ -48,6 +47,7 @@ from src.signal.data.pykrx_source import trading_days
 from src.signal.data.sources import fetch_ticker_panel
 from src.signal.notify.telegram_bot import send_message
 from src.signal.universe import load_universe, ticker_to_name
+from src.util.keychain import load_signal_keys, load_telegram_keys
 
 ROOT = Path(__file__).resolve().parents[2]
 log = logging.getLogger("stock-signal")
@@ -178,8 +178,13 @@ def format_message(
 
 def run(argv: Iterable[str] | None = None) -> int:
     args = parse_args(list(argv) if argv is not None else sys.argv[1:])
-    load_dotenv(ROOT / ".env")
     setup_logging()
+    # Keychain → os.environ inject. 로깅을 먼저 켜야 launchd 실행 기록에 남는다.
+    # 리포트는 길이/상태 문자열만 담는다 — 값은 절대 로그로 나가지 않는다.
+    signal_keys = load_signal_keys()
+    telegram_keys = load_telegram_keys()
+    log.info("signal credentials: %s", signal_keys)
+    log.info("telegram credentials: %s", telegram_keys)
     cfg = load_config()
     params = cfg["params"]
 
