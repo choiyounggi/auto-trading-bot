@@ -21,12 +21,23 @@ export type Mode = (typeof MODES)[number];
 export const AGENTS = ["claude", "codex", "pi", "gemini"] as const;
 export type Agent = (typeof AGENTS)[number];
 
+/**
+ * Backends allowed for news enrichment. Deliberately *not* `AGENTS`: `gemini` is
+ * absent because the signal producer's `NEWS_LLM_BACKEND` has no gemini path, so
+ * accepting it here would validate a value that fails at run time; `none` is
+ * present because "do not call an LLM" is a real choice, and the default one.
+ */
+export const NEWS_BACKENDS = ["none", "claude", "codex", "pi"] as const;
+export type NewsBackend = (typeof NEWS_BACKENDS)[number];
+
 export const JOB_KEYS = [
   "orchestrator",
   "monitor",
   "reconciler",
   "dipBuy",
   "usOrchestrator",
+  "signalKr",
+  "signalUs",
 ] as const;
 export type JobName = (typeof JOB_KEYS)[number];
 
@@ -36,12 +47,24 @@ export const REQUIRED = ["mode", "projectDir", "pythonPath", "signalDir"] as con
 /** Absolute-path keys, checked after the required-presence pass. */
 const PATH_KEYS = ["projectDir", "pythonPath", "signalDir"] as const;
 
+/**
+ * Where the bundled signal producer writes and the trader reads.
+ *
+ * This is only the value `init` suggests at the prompt — `signalDir` stays a
+ * required key with no parser default, so a config that omits it still fails
+ * loudly instead of silently pointing at a directory nobody chose.
+ */
+export function defaultSignalDir(projectDir: string): string {
+  return join(projectDir, "data", "signals");
+}
+
 export interface Config {
   mode: Mode;
   projectDir: string;
   pythonPath: string;
   signalDir: string;
   llmAgent: Agent;
+  newsLlmBackend: NewsBackend;
   jobs: Record<JobName, boolean>;
 }
 
@@ -118,12 +141,30 @@ export function parseConfig(input: unknown): ParseResult {
     }
   }
 
+  // Separate from `llmAgent` on purpose: that one picks the model that makes
+  // trading decisions, this one only classifies news headlines. Deriving it
+  // would quietly bill the trading agent for enrichment work, so it defaults to
+  // "none" — no LLM call, no cost — until the user asks for one.
+  let newsLlmBackend: NewsBackend = "none";
+  if (input.newsLlmBackend !== undefined) {
+    if (
+      typeof input.newsLlmBackend !== "string" ||
+      !NEWS_BACKENDS.includes(input.newsLlmBackend as NewsBackend)
+    ) {
+      errors.push(`newsLlmBackend must be one of ${NEWS_BACKENDS.join(", ")}`);
+    } else {
+      newsLlmBackend = input.newsLlmBackend as NewsBackend;
+    }
+  }
+
   const jobs: Record<JobName, boolean> = {
     orchestrator: true,
     monitor: true,
     reconciler: true,
     dipBuy: true,
     usOrchestrator: true,
+    signalKr: true,
+    signalUs: true,
   };
   if (input.jobs !== undefined) {
     if (!isPlainObject(input.jobs)) {
@@ -151,6 +192,7 @@ export function parseConfig(input: unknown): ParseResult {
       pythonPath: input.pythonPath as string,
       signalDir: input.signalDir as string,
       llmAgent,
+      newsLlmBackend,
       jobs,
     },
   };

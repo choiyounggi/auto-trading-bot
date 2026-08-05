@@ -50,21 +50,47 @@ const TIMEOUT_MS = 10_000;
 const BOOTSTRAP_ATTEMPTS = 3;
 const BOOTSTRAP_PAUSE_MS = 700;
 
+/**
+ * A guarded job's lock is reclaimed once it is this old.
+ *
+ * Sized against the work, not the schedule: a 260-day-lookback signal run is
+ * minutes, so 15 covers a slow run with room to spare, while still letting the
+ * *next* day's schedule proceed after a crash rather than skipping forever.
+ */
+const STALE_LOCK_MINUTES = 15;
+
 /** PATH entries appended after the interpreter's own directory. */
 const BASE_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 
 export interface JobSpec {
   /** Arguments after the interpreter — always a `-m module` invocation. */
   args: string[];
-  schedule: { hour: number; minute: number } | { intervalSec: number };
+  schedule:
+    | { hour: number; minute: number }
+    /** Several fixed times on each weekday — `signalUs` runs at 22:35 and 23:35. */
+    | { times: { hour: number; minute: number }[] }
+    | { intervalSec: number };
   /** Basename of the stdout log; stderr gets the `.err.log` sibling. */
   log: string;
+  /**
+   * Wrap the run in the overlap/hang guard (see `guardScript`).
+   *
+   * Only the signal jobs need it: they can run for minutes over a 260-day
+   * lookback, so the 16:30 run may still be going when the next schedule fires,
+   * and a second concurrent pykrx session against the same account is not
+   * something to find out about in production. The trading jobs are short and
+   * already idempotent.
+   */
+  guarded?: boolean;
 }
 
 /**
- * The five jobs, with the schedules the previously hand-installed plists ran on.
+ * The seven jobs, with the schedules the previously hand-installed plists ran on.
  * Keyed by `JobName`, so a job added to `config.ts` without a schedule here is a
  * type error rather than a job that silently never installs.
+ *
+ * Ordering matters between the two halves: the signal producer must finish
+ * before the trader reads its output. KR is 16:30 → 16:45, US is 22:35 → 22:45.
  */
 export const JOBS: Record<JobKey, JobSpec> = {
   orchestrator: {
@@ -92,7 +118,67 @@ export const JOBS: Record<JobKey, JobSpec> = {
     schedule: { hour: 22, minute: 45 },
     log: "usOrchestrator.log",
   },
+  // The two signal jobs' arguments are copied from the shell scripts that ran
+  // them before the port (`run_daily.sh`, `run_us_open.sh`), including the
+  // 260-day lookback the turtle_breakout strategy needs for its 200-day line.
+  signalKr: {
+    args: ["-m", "src.signal.main", "--lookback", "260"],
+    schedule: { hour: 16, minute: 30 },
+    log: "signalKr.log",
+    guarded: true,
+  },
+  signalUs: {
+    args: ["-m", "src.signal.main", "--overseas-only", "--lookback", "260", "--no-llm"],
+    schedule: { times: [{ hour: 22, minute: 35 }, { hour: 23, minute: 35 }] },
+    log: "signalUs.log",
+    guarded: true,
+  },
 };
+
+/** Where a guarded job's lock directory lives. */
+export function lockPath(job: JobKey, home: string): string {
+  return join(home, "locks", `${job}.lock`);
+}
+
+/**
+ * The `sh -c` program for a guarded job.
+ *
+ * `mkdir` is the lock because it is atomic on POSIX: the second concurrent run
+ * fails to create the directory and exits 0, which is skip-on-overlap. That
+ * alone is a trap — a run that dies without releasing leaves the lock forever
+ * and every later schedule silently skips — so a lock older than
+ * `STALE_LOCK_MINUTES` is reclaimed. `trap … EXIT` covers the normal path.
+ *
+ * The command is **not** `exec`'d. `exec` replaces the shell, which discards the
+ * EXIT trap, so the lock would survive every successful run and each job would
+ * only start once the staleness window had passed. Measured: with `exec`, a
+ * completed run left its lock directory behind. Running the command as a child
+ * keeps the shell alive to release it, and `$?` is still the job's exit status.
+ *
+ * Deliberately built from stock tools only. `flock` and `timeout` are the
+ * obvious choices and **neither ships with macOS** (measured: `/usr/bin/flock`
+ * and `/usr/bin/timeout` are absent; the Homebrew `timeout` exists only where
+ * coreutils is installed, which this package cannot assume). `mkdir` and BSD
+ * `find -mmin` are always there.
+ */
+export function guardScript(job: JobKey, cfg: Config, home: string): string {
+  const lock = lockPath(job, home);
+  const cmd = [cfg.pythonPath, ...JOBS[job].args].map(shq).join(" ");
+  return (
+    `L=${shq(lock)}; ` +
+    `if ! mkdir "$L" 2>/dev/null; then ` +
+    `if [ -n "$(find "$L" -maxdepth 0 -mmin +${STALE_LOCK_MINUTES} 2>/dev/null)" ]; then ` +
+    `rmdir "$L" 2>/dev/null; mkdir "$L" 2>/dev/null || exit 0; ` +
+    `else exit 0; fi; fi; ` +
+    `trap 'rmdir "$L" 2>/dev/null' EXIT; ` +
+    cmd
+  );
+}
+
+/** Single-quote for `sh`, closing and reopening around any embedded quote. */
+function shq(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
 
 /** Runs `launchctl` with `args` and returns its stdout; throws on failure. */
 export type LaunchctlRunner = (args: string[]) => string;
@@ -139,14 +225,19 @@ function scheduleXml(job: JobKey): string {
   if ("intervalSec" in schedule) {
     return `  <key>StartInterval</key>\n  <integer>${schedule.intervalSec}</integer>\n`;
   }
+  // One entry per time, so the single-time form renders exactly as before.
+  const times = "times" in schedule ? schedule.times : [schedule];
   // Weekday 1–5 is Monday–Friday: the markets these jobs trade are closed on
-  // weekends, and launchd has no "weekdays" shorthand.
+  // weekends, and launchd has no "weekdays" shorthand. A job with two times
+  // therefore emits 5 × 2 dicts.
   const days = [1, 2, 3, 4, 5]
-    .map(
-      (day) =>
-        `    <dict><key>Weekday</key><integer>${day}</integer>` +
-        `<key>Hour</key><integer>${schedule.hour}</integer>` +
-        `<key>Minute</key><integer>${schedule.minute}</integer></dict>\n`,
+    .flatMap((day) =>
+      times.map(
+        (t) =>
+          `    <dict><key>Weekday</key><integer>${day}</integer>` +
+          `<key>Hour</key><integer>${t.hour}</integer>` +
+          `<key>Minute</key><integer>${t.minute}</integer></dict>\n`,
+      ),
     )
     .join("");
   return `  <key>StartCalendarInterval</key>\n  <array>\n${days}  </array>\n`;
@@ -163,7 +254,10 @@ export function renderPlist(
   username?: string,
 ): string {
   const label = labelFor(job, username);
-  const program = [cfg.pythonPath, ...JOBS[job].args]
+  const argv = JOBS[job].guarded
+    ? ["/bin/sh", "-c", guardScript(job, cfg, home)]
+    : [cfg.pythonPath, ...JOBS[job].args];
+  const program = argv
     .map((arg) => `    <string>${esc(arg)}</string>\n`)
     .join("");
   const env: [string, string][] = [
@@ -268,6 +362,10 @@ export function installJob(
   // before the process starts, and a missing directory makes the job fail to
   // spawn with no diagnostic anywhere.
   mkdirSync(join(home, "logs"), { recursive: true });
+  // The guarded jobs create their lock *inside* this directory, and `mkdir`
+  // fails rather than creating parents — so the parent has to exist before the
+  // first run, or every guarded run would exit 0 as if it had been skipped.
+  mkdirSync(join(home, "locks"), { recursive: true });
 
   writeFileSync(path, renderPlist(job, cfg, home), { mode: 0o644 });
   // writeFileSync's mode only applies at creation; chmod covers an overwrite of

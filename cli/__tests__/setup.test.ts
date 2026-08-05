@@ -137,6 +137,12 @@ function stubDeps(over: Partial<InitDeps> = {}): {
   return { deps: { ...base, ...over }, rec };
 }
 
+/** One "y" per launchd job, derived so adding a job cannot silently starve the
+ *  script — these tests assert every scripted answer is consumed, so a
+ *  hardcoded count turns a new job into an opaque
+ *  "input closed before an answer was given". */
+const YES_PER_JOB: readonly string[] = JOB_KEYS.map(() => "y");
+
 /** Answers for a full paper-mode run that says yes to everything. */
 const HAPPY: readonly string[] = [
   "paper",
@@ -148,11 +154,7 @@ const HAPPY: readonly string[] = [
   TG_CHAT,
   "claude",
   SIGNAL_DIR,
-  "y",
-  "y",
-  "y",
-  "y",
-  "y",
+  ...YES_PER_JOB,
 ];
 
 async function run(
@@ -210,11 +212,7 @@ test("declining Telegram still succeeds and writes only the three KIS items", as
     "n",
     "claude",
     SIGNAL_DIR,
-    "y",
-    "y",
-    "y",
-    "y",
-    "y",
+    ...YES_PER_JOB,
   ];
   const { code, h } = await run(answers, deps);
 
@@ -287,11 +285,7 @@ test("confirming real mode scopes the keychain accounts to real", async () => {
     "n",
     "claude",
     SIGNAL_DIR,
-    "y",
-    "y",
-    "y",
-    "y",
-    "y",
+    ...YES_PER_JOB,
   ];
   const { code, h } = await run(answers, deps);
 
@@ -306,6 +300,11 @@ test("confirming real mode scopes the keychain accounts to real", async () => {
 
 test("job answers are recorded into the config and only accepted jobs install", async () => {
   const { deps, rec } = stubDeps();
+  // Accept every other job, derived from JOB_KEYS so the expectations below
+  // cannot drift out of step with the job list the way a hardcoded run of
+  // answers does.
+  const accepted = JOB_KEYS.filter((_, i) => i % 2 === 0);
+  const declined = JOB_KEYS.filter((_, i) => i % 2 === 1);
   const answers = [
     "paper",
     KIS_KEY,
@@ -314,25 +313,19 @@ test("job answers are recorded into the config and only accepted jobs install", 
     "n",
     "claude",
     SIGNAL_DIR,
-    "y",
-    "n",
-    "y",
-    "n",
-    "y",
+    ...JOB_KEYS.map((_, i) => (i % 2 === 0 ? "y" : "n")),
   ];
   const { code, h } = await run(answers, deps);
 
   assert.equal(code, 0);
   assert.equal(h.unused(), 0);
-  assert.deepEqual(rec.installed, ["orchestrator", "reconciler", "usOrchestrator"]);
+  assert.ok(accepted.length > 0 && declined.length > 0, "the split must exercise both branches");
+  assert.deepEqual(rec.installed, [...accepted]);
   assert.equal(rec.saved.length, 2, "config is saved before and after launchd");
-  assert.deepEqual(rec.saved[1].jobs, {
-    orchestrator: true,
-    monitor: false,
-    reconciler: true,
-    dipBuy: false,
-    usOrchestrator: true,
-  });
+  assert.deepEqual(
+    rec.saved[1].jobs,
+    Object.fromEntries(JOB_KEYS.map((k, i) => [k, i % 2 === 0])),
+  );
 });
 
 test("a job that installs but does not load prints the manual bootstrap line", async () => {
@@ -505,11 +498,7 @@ test("an unreadable Telegram token degrades to skipped instead of failing", asyn
     "nope-either",
     "claude",
     SIGNAL_DIR,
-    "y",
-    "y",
-    "y",
-    "y",
-    "y",
+    ...YES_PER_JOB,
   ];
   const { code, h } = await run(answers, deps);
 
@@ -531,11 +520,7 @@ test("an out-of-range choice falls back instead of blocking the run", async () =
     "n",
     "claude",
     SIGNAL_DIR,
-    "y",
-    "y",
-    "y",
-    "y",
-    "y",
+    ...YES_PER_JOB,
   ];
   const { code, h } = await run(answers, deps);
 
