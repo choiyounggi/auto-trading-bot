@@ -1,6 +1,6 @@
 #!/bin/bash
-# 자택 맥북 stock-trader 운영 상태 일괄 점검.
-# SSH로 실행: ssh macbook-home '~/stock-trader/scripts/healthcheck.sh'
+# 운영 상태 일괄 점검. 프로젝트 루트 기준으로 동작한다.
+# 원격 실행 예: ssh <host> '<project-dir>/scripts/healthcheck.sh'
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -14,7 +14,9 @@ launchctl list | grep caffeinate || echo "(미등록)"
 
 echo
 echo "===3. stock-trader launchd 3개==="
-for p in com.choeyeonggi.tradeorch com.choeyeonggi.posmonitor com.choeyeonggi.dailyreconciler; do
+# 레이블은 cli/launchd.ts 의 labelFor() 와 같은 규칙: com.<user>.kistrader.<job>
+for job in orchestrator monitor reconciler; do
+  p="com.$(id -un).kistrader.$job"
   launchctl list | grep "$p" || echo "$p (미등록)"
 done
 

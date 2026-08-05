@@ -1,7 +1,7 @@
 [project]
-name = "stock-trader"
+name = "kis-trader"
 version = "0.0.1"
-description = "LLM 기반 한국 주식 완전자동매매 (stock-signal-bot 신호 연계 + 키움 MCP)"
+description = "LLM 기반 한국투자증권(KIS) 자동매매 엔진"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.5",
@@ -10,7 +10,6 @@ dependencies = [
     "pyyaml>=6.0",
     "requests>=2.32",
     "python-dotenv>=1.0",
-    "mcp>=0.9",
     "jsonschema>=4.21",
     "holidays>=0.50",
 ]
