@@ -1,5 +1,5 @@
 /**
- * `runInit` drives seven interactive steps and writes to the keychain, the
+ * `runInit` drives eight interactive steps and writes to the keychain, the
  * config file, a venv, and launchd. None of that may happen here: every
  * collaborator is injected as a stub, and the only "input" is a pair of
  * in-memory streams. A test that reached the real machine would install
@@ -14,14 +14,19 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { PassThrough, Writable } from "node:stream";
 import { join } from "node:path";
 
 import { runInit, type InitDeps } from "../setup.js";
-import { JOB_KEYS, type Config } from "../config.js";
+import { JOB_KEYS, defaultSignalDir, type Config } from "../config.js";
 import {
+  BRAVE_KEY_ACCOUNT,
   KIS_SERVICE,
+  KRX_ID_ACCOUNT,
+  KRX_PW_ACCOUNT,
   KeychainLockedError,
+  SIGNAL_SERVICE,
   TELEGRAM_CHATID_ACCOUNT,
   TELEGRAM_SERVICE,
   TELEGRAM_TOKEN_ACCOUNT,
@@ -40,9 +45,27 @@ const KIS_ACCT = "1234567890";
 const TG_TOKEN = "999888:TOKENAAAABBBBCCCCDDDDEE";
 const TG_CHAT = "123456789";
 const SIGNAL_DIR = "/Users/tester/stock-signal-bot/data/signals";
+const KRX_ID = "KRXLOGINID0003";
+const KRX_PW = "KRXPASSWORD0004";
+const BRAVE_KEY = "BSABRAVEKEYVALUE0005";
 
 /** Every value fed to a prompt that must never reach the screen or a log. */
-const FED_SECRETS = [KIS_KEY, KIS_SECRET, TG_TOKEN, KIS_ACCT, TG_CHAT];
+const FED_SECRETS = [
+  KIS_KEY,
+  KIS_SECRET,
+  TG_TOKEN,
+  KIS_ACCT,
+  TG_CHAT,
+  KRX_ID,
+  KRX_PW,
+  BRAVE_KEY,
+];
+
+/** Signal step: configure both credentials, then pick a news backend. */
+const SIGNAL_ACCEPT: readonly string[] = ["y", KRX_ID, KRX_PW, "y", BRAVE_KEY, "claude"];
+
+/** Signal step: decline both credentials and leave the backend at "none". */
+const SIGNAL_SKIP: readonly string[] = ["n", "n", "none"];
 
 // ── harness ───────────────────────────────────────────────────────────
 
@@ -154,6 +177,7 @@ const HAPPY: readonly string[] = [
   TG_CHAT,
   "claude",
   SIGNAL_DIR,
+  ...SIGNAL_ACCEPT,
   ...YES_PER_JOB,
 ];
 
@@ -169,13 +193,13 @@ async function run(
 
 // ── normal ────────────────────────────────────────────────────────────
 
-test("the happy path saves a paper config and writes five keychain items", async () => {
+test("the happy path saves a paper config and writes eight keychain items", async () => {
   const { deps, rec } = stubDeps();
   const { code, h } = await run(HAPPY, deps);
 
   assert.equal(code, 0);
   assert.equal(h.unused(), 0, "every scripted answer should be consumed");
-  assert.equal(rec.keychain.length, 5, "3 KIS + 2 Telegram");
+  assert.equal(rec.keychain.length, 8, "3 KIS + 2 Telegram + 2 KRX + 1 Brave");
   assert.ok(rec.saved.length >= 1);
   assert.equal(rec.saved[0].mode, "paper");
   assert.equal(rec.saved[0].projectDir, PROJECT);
@@ -196,7 +220,7 @@ test("the KIS items land under the mode-scoped accounts the engine reads", async
     { service: KIS_SERVICE, account: "paper-secret", secret: KIS_SECRET },
     { service: KIS_SERVICE, account: "paper-account", secret: KIS_ACCT },
   ]);
-  assert.deepEqual(rec.keychain.slice(3), [
+  assert.deepEqual(rec.keychain.slice(3, 5), [
     { service: TELEGRAM_SERVICE, account: TELEGRAM_TOKEN_ACCOUNT, secret: TG_TOKEN },
     { service: TELEGRAM_SERVICE, account: TELEGRAM_CHATID_ACCOUNT, secret: TG_CHAT },
   ]);
@@ -212,6 +236,7 @@ test("declining Telegram still succeeds and writes only the three KIS items", as
     "n",
     "claude",
     SIGNAL_DIR,
+    ...SIGNAL_SKIP,
     ...YES_PER_JOB,
   ];
   const { code, h } = await run(answers, deps);
@@ -236,6 +261,9 @@ test("no captured output line contains a value fed to a prompt", async () => {
   assert.ok(out.includes("KIS app key"));
   assert.ok(out.includes("KIS app secret"));
   assert.ok(out.includes("Telegram bot token"));
+  assert.ok(out.includes("KRX ID"));
+  assert.ok(out.includes("KRX 비밀번호"));
+  assert.ok(out.includes("Brave Search API key"));
   for (const line of out.split("\n")) {
     for (const secret of FED_SECRETS) {
       assert.equal(
@@ -247,15 +275,15 @@ test("no captured output line contains a value fed to a prompt", async () => {
   }
 });
 
-test("all seven step headers are printed in order", async () => {
+test("all eight step headers are printed in order", async () => {
   const { deps } = stubDeps();
   const { code, h } = await run(HAPPY, deps);
 
   assert.equal(code, 0);
   const out = h.out();
   let cursor = -1;
-  for (let n = 1; n <= 7; n += 1) {
-    const at = out.indexOf(`── Step ${n}/7 — `);
+  for (let n = 1; n <= 8; n += 1) {
+    const at = out.indexOf(`── Step ${n}/8 — `);
     assert.notEqual(at, -1, `missing header for step ${n}`);
     assert.ok(at > cursor, `step ${n} header is out of order`);
     cursor = at;
@@ -285,6 +313,7 @@ test("confirming real mode scopes the keychain accounts to real", async () => {
     "n",
     "claude",
     SIGNAL_DIR,
+    ...SIGNAL_SKIP,
     ...YES_PER_JOB,
   ];
   const { code, h } = await run(answers, deps);
@@ -313,6 +342,7 @@ test("job answers are recorded into the config and only accepted jobs install", 
     "n",
     "claude",
     SIGNAL_DIR,
+    ...SIGNAL_SKIP,
     ...JOB_KEYS.map((_, i) => (i % 2 === 0 ? "y" : "n")),
   ];
   const { code, h } = await run(answers, deps);
@@ -422,7 +452,7 @@ test("no usable Python aborts with the exact remediation line", async () => {
 test("an invalid config is reported and never saved", async () => {
   const { deps, rec } = stubDeps();
   const { code, h } = await run(
-    ["paper", KIS_KEY, KIS_SECRET, KIS_ACCT, "n", "claude", SIGNAL_DIR],
+    ["paper", KIS_KEY, KIS_SECRET, KIS_ACCT, "n", "claude", SIGNAL_DIR, ...SIGNAL_SKIP],
     deps,
     "relative/project/dir",
   );
@@ -475,7 +505,7 @@ test("a failed bootstrap step stops before any launchd job is installed", async 
     },
   });
   const { code, h } = await run(
-    ["paper", KIS_KEY, KIS_SECRET, KIS_ACCT, "n", "claude", SIGNAL_DIR],
+    ["paper", KIS_KEY, KIS_SECRET, KIS_ACCT, "n", "claude", SIGNAL_DIR, ...SIGNAL_SKIP],
     deps,
   );
 
@@ -498,6 +528,7 @@ test("an unreadable Telegram token degrades to skipped instead of failing", asyn
     "nope-either",
     "claude",
     SIGNAL_DIR,
+    ...SIGNAL_SKIP,
     ...YES_PER_JOB,
   ];
   const { code, h } = await run(answers, deps);
@@ -520,6 +551,7 @@ test("an out-of-range choice falls back instead of blocking the run", async () =
     "n",
     "claude",
     SIGNAL_DIR,
+    ...SIGNAL_SKIP,
     ...YES_PER_JOB,
   ];
   const { code, h } = await run(answers, deps);
@@ -527,4 +559,231 @@ test("an out-of-range choice falls back instead of blocking the run", async () =
   assert.equal(code, 0);
   assert.equal(h.unused(), 0);
   assert.equal(rec.saved[0].mode, "paper", "the safe default wins, never real");
+});
+
+// ── signal pipeline (step 6/8) ─────────────────────────────────────────
+
+test("the signal keychain names match the Python reader exactly", () => {
+  // A wire contract, not a preference: `src/util/keychain.py` looks the items up
+  // by these strings, so a typo here compiles and passes review, then shows up
+  // months later as a signal run that quietly reports the credential missing.
+  assert.equal(SIGNAL_SERVICE, "signal-bot");
+  assert.equal(KRX_ID_ACCOUNT, "krx-id");
+  assert.equal(KRX_PW_ACCOUNT, "krx-pw");
+  assert.equal(BRAVE_KEY_ACCOUNT, "brave-api-key");
+
+  // Pinning the literals only fixes this side. Reading the consumer proves both
+  // halves still agree, so a rename on either side fails here instead of at run
+  // time. `npm test` runs from the package root.
+  const reader = readFileSync(join(process.cwd(), "src", "util", "keychain.py"), "utf8");
+  assert.ok(
+    reader.includes(`SIGNAL_SERVICE = ${JSON.stringify(SIGNAL_SERVICE)}`),
+    "the Python reader declares a different SIGNAL_SERVICE",
+  );
+  for (const account of [KRX_ID_ACCOUNT, KRX_PW_ACCOUNT, BRAVE_KEY_ACCOUNT]) {
+    assert.ok(
+      reader.includes(JSON.stringify(account)),
+      `the Python reader never looks up the account ${account}`,
+    );
+  }
+});
+
+test("the happy path stores the KRX pair and the Brave key under the signal service", async () => {
+  const { deps, rec } = stubDeps();
+  const { code } = await run(HAPPY, deps);
+
+  assert.equal(code, 0);
+  assert.deepEqual(rec.keychain.slice(5), [
+    { service: SIGNAL_SERVICE, account: KRX_ID_ACCOUNT, secret: KRX_ID },
+    { service: SIGNAL_SERVICE, account: KRX_PW_ACCOUNT, secret: KRX_PW },
+    { service: SIGNAL_SERVICE, account: BRAVE_KEY_ACCOUNT, secret: BRAVE_KEY },
+  ]);
+});
+
+test("declining both KRX and Brave writes nothing and keeps the backend at none", async () => {
+  const { deps, rec } = stubDeps();
+  const answers = [
+    "paper",
+    KIS_KEY,
+    KIS_SECRET,
+    KIS_ACCT,
+    "y",
+    TG_TOKEN,
+    TG_CHAT,
+    "claude",
+    SIGNAL_DIR,
+    ...SIGNAL_SKIP,
+    ...YES_PER_JOB,
+  ];
+  const { code, h } = await run(answers, deps);
+
+  assert.equal(code, 0, "both credentials are optional");
+  assert.equal(h.unused(), 0);
+  assert.equal(rec.keychain.length, 5, "3 KIS + 2 Telegram, and nothing else");
+  assert.equal(
+    rec.keychain.some((item) => item.service === SIGNAL_SERVICE),
+    false,
+    "a declined credential must not be written as an empty item",
+  );
+  assert.equal(rec.saved[0].newsLlmBackend, "none");
+});
+
+test("the signal directory prompt defaults to the package's own data/signals", async () => {
+  const { deps, rec } = stubDeps();
+  const answers = [
+    "paper",
+    KIS_KEY,
+    KIS_SECRET,
+    KIS_ACCT,
+    "n",
+    "claude",
+    // Empty: take whatever the prompt offered.
+    "",
+    ...SIGNAL_SKIP,
+    ...YES_PER_JOB,
+  ];
+  const { code, h } = await run(answers, deps);
+
+  assert.equal(code, 0);
+  assert.equal(h.unused(), 0);
+  const expected = defaultSignalDir(PROJECT);
+  assert.equal(expected, join(PROJECT, "data", "signals"));
+  assert.ok(
+    h.out().includes(`[${expected}]`),
+    "the offered default must be the bundled producer's own output directory",
+  );
+  assert.equal(rec.saved[0].signalDir, expected);
+});
+
+test("the chosen news backend reaches the saved config", async () => {
+  const { deps, rec } = stubDeps();
+  const { code } = await run(HAPPY, deps);
+
+  assert.equal(code, 0);
+  assert.equal(rec.saved[0].newsLlmBackend, "claude");
+});
+
+test("an unlisted news backend falls back to none instead of blocking", async () => {
+  const { deps, rec } = stubDeps();
+  const answers = [
+    "paper",
+    KIS_KEY,
+    KIS_SECRET,
+    KIS_ACCT,
+    "n",
+    "claude",
+    SIGNAL_DIR,
+    "n",
+    "n",
+    // Three unlisted answers exhaust `choose`, which then takes its fallback.
+    "gpt",
+    "ollama",
+    "llama",
+    ...YES_PER_JOB,
+  ];
+  const { code, h } = await run(answers, deps);
+
+  assert.equal(code, 0);
+  assert.equal(h.unused(), 0);
+  assert.equal(rec.saved[0].newsLlmBackend, "none");
+});
+
+test("a KRX login whose password is unreadable is skipped, not half-written", async () => {
+  const { deps, rec } = stubDeps();
+  const answers = [
+    "paper",
+    KIS_KEY,
+    KIS_SECRET,
+    KIS_ACCT,
+    "n",
+    "claude",
+    SIGNAL_DIR,
+    "y",
+    KRX_ID,
+    // Three empty passwords exhaust the secret prompt.
+    "",
+    "",
+    "",
+    "n",
+    "none",
+    ...YES_PER_JOB,
+  ];
+  const { code, h } = await run(answers, deps);
+
+  assert.equal(code, 0, "an optional credential must not fail the whole setup");
+  assert.equal(h.unused(), 0);
+  assert.equal(
+    rec.keychain.some((item) => item.service === SIGNAL_SERVICE),
+    false,
+    "writing the id without its password leaves a login the engine cannot use",
+  );
+  assert.equal(rec.keychain.length, 3, "only the three KIS items");
+  assert.equal(rec.saved.length, 2, "the run still completes");
+});
+
+test("a locked keychain during the signal step aborts before the config is saved", async () => {
+  const { deps, rec } = stubDeps({
+    keychainSet: (service, account, secret) => {
+      if (service === SIGNAL_SERVICE) throw new KeychainLockedError();
+      rec.keychain.push({ service, account, secret });
+    },
+  });
+  const { code, h } = await run(
+    [
+      "paper",
+      KIS_KEY,
+      KIS_SECRET,
+      KIS_ACCT,
+      "n",
+      "claude",
+      SIGNAL_DIR,
+      "y",
+      KRX_ID,
+      KRX_PW,
+      "n",
+    ],
+    deps,
+  );
+
+  assert.equal(code, 1);
+  assert.equal(h.unused(), 0);
+  assert.ok(
+    h.out().includes("keychain is locked"),
+    "the user must be told to unlock, not shown an opaque failure",
+  );
+  assert.equal(rec.saved.length, 0, "nothing may be saved after the step failed");
+  assert.equal(rec.bootstrapped, 0);
+  assert.equal(rec.installed.length, 0);
+  assert.equal(rec.keychain.length, 3, "the earlier KIS writes are all that landed");
+});
+
+test("Telegram is prompted exactly once across the whole flow", async () => {
+  const { deps } = stubDeps();
+  const { code, h } = await run(HAPPY, deps);
+
+  assert.equal(code, 0);
+  // The signal bot reads the same `telegram-bot` item the Telegram step wrote,
+  // so a second prompt would collect a value that could disagree with the first.
+  const tokenPrompts = h
+    .out()
+    .split("\n")
+    .filter((line) => /[Tt]elegram/.test(line) && /token/i.test(line));
+  assert.equal(tokenPrompts.length, 1, `token prompted ${tokenPrompts.length} times`);
+});
+
+test("the two signal jobs are offered with their schedules by the shared job loop", async () => {
+  const { deps, rec } = stubDeps();
+  const { code, h } = await run(HAPPY, deps);
+
+  assert.equal(code, 0);
+  const out = h.out();
+  assert.ok(out.includes("Install signalKr (daily 16:30)?"), "signalKr must be offered");
+  assert.ok(
+    out.includes("Install signalUs (daily 22:35, 23:35)?"),
+    "every fixed time must be shown, not just the first",
+  );
+  assert.ok(rec.installed.includes("signalKr"));
+  assert.ok(rec.installed.includes("signalUs"));
+  assert.equal(rec.saved[1].jobs.signalKr, true);
+  assert.equal(rec.saved[1].jobs.signalUs, true);
 });
