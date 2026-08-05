@@ -1,0 +1,277 @@
+# 해외주식 신호 생성용 watchlist.
+# - exchange: KIS 해외주식 주문 거래소 코드 (NASD/NYSE/AMEX)
+# - quote_exchange: KIS 해외시세 거래소 코드 (NAS/NYS/AMS)
+# - yf_symbol: yfinance 조회 심볼 / benchmark+sector_etf: 상대강도·섹터추세
+# 2026-06-29 확대: 5 → 27종목 (고베타/모멘텀 나스닥·반도체·성장주). 원본 .bak-5tickers 보존.
+enabled: true
+tickers:
+  - symbol: AAPL
+    name: Apple
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: AAPL
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: XLK
+  - symbol: MSFT
+    name: Microsoft
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: MSFT
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: XLK
+  - symbol: NVDA
+    name: NVIDIA
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: NVDA
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: SMH
+  - symbol: AMD
+    name: Advanced Micro Devices
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: AMD
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: SMH
+  - symbol: AVGO
+    name: Broadcom
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: AVGO
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: SMH
+  - symbol: MU
+    name: Micron Technology
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: MU
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: SMH
+  - symbol: ASML
+    name: ASML Holding
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: ASML
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: SMH
+  - symbol: MRVL
+    name: Marvell Technology
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: MRVL
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: SMH
+  - symbol: QCOM
+    name: Qualcomm
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: QCOM
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: SMH
+  - symbol: ARM
+    name: Arm Holdings
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: ARM
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: SMH
+  - symbol: SMCI
+    name: Super Micro Computer
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: SMCI
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: SMH
+  - symbol: TSM
+    name: Taiwan Semiconductor
+    exchange: NYSE
+    quote_exchange: NYS
+    currency: USD
+    yf_symbol: TSM
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: SMH
+  - symbol: GOOGL
+    name: Alphabet
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: GOOGL
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: XLK
+  - symbol: META
+    name: Meta Platforms
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: META
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: XLK
+  - symbol: AMZN
+    name: Amazon
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: AMZN
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: XLY
+  - symbol: TSLA
+    name: Tesla
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: TSLA
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: XLY
+  - symbol: NFLX
+    name: Netflix
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: NFLX
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: XLY
+  - symbol: CRM
+    name: Salesforce
+    exchange: NYSE
+    quote_exchange: NYS
+    currency: USD
+    yf_symbol: CRM
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: XLK
+  - symbol: ADBE
+    name: Adobe
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: ADBE
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: XLK
+  - symbol: ORCL
+    name: Oracle
+    exchange: NYSE
+    quote_exchange: NYS
+    currency: USD
+    yf_symbol: ORCL
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: XLK
+  - symbol: NOW
+    name: ServiceNow
+    exchange: NYSE
+    quote_exchange: NYS
+    currency: USD
+    yf_symbol: NOW
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: XLK
+  - symbol: PLTR
+    name: Palantir
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: PLTR
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: XLK
+  - symbol: COIN
+    name: Coinbase
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: COIN
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: XLK
+  - symbol: SHOP
+    name: Shopify
+    exchange: NYSE
+    quote_exchange: NYS
+    currency: USD
+    yf_symbol: SHOP
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: XLY
+  - symbol: UBER
+    name: Uber Technologies
+    exchange: NYSE
+    quote_exchange: NYS
+    currency: USD
+    yf_symbol: UBER
+    benchmark_symbol: QQQ
+    benchmark_exchange: NASD
+    benchmark_quote_exchange: NAS
+    sector_etf: XLY
+  - symbol: QQQ
+    name: Invesco QQQ ETF
+    exchange: NASD
+    quote_exchange: NAS
+    currency: USD
+    yf_symbol: QQQ
+    benchmark_symbol: SPY
+    benchmark_exchange: AMEX
+    benchmark_quote_exchange: AMS
+    sector_etf: QQQ
+  - symbol: SPY
+    name: SPDR S&P 500 ETF
+    exchange: AMEX
+    quote_exchange: AMS
+    currency: USD
+    yf_symbol: SPY
+    benchmark_symbol: SPY
+    benchmark_exchange: AMEX
+    benchmark_quote_exchange: AMS
+    sector_etf: SPY
