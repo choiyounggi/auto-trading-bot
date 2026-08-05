@@ -1,0 +1,44 @@
+# 신호 점수 임계치
+signal:
+  buy_threshold: 5      # final_score >= 이 값이면 BUY 알림
+  caution_threshold: -3 # final_score <= 이 값이면 CAUTION 알림
+
+# BUY 신호 가중치
+buy_weights:
+  A1_inst_foreign_both: 2   # 당일 기관+외국인 동시 순매수
+  A2_consecutive_buying: 3  # N일 연속 순매수
+  A3_decoupling: 3          # 누적 순매수 상위 + 수익률 하위
+  A4_volume_spike: 1        # 거래량 급증
+
+# CAUTION 신호 가중치 (음수)
+caution_weights:
+  B1_one_day_only: -2       # 3일 중 기관 +1일만
+  B2_already_pumped: -2     # 5일 수익률 상위 (이미 급등)
+  B3_only_inst_buying: -3   # 외국인 음 + 개인 강한 음 + 기관만 양
+  B4_only_금융투자: -2      # 기관 중 금융투자 비중 80%+
+
+# 파라미터
+params:
+  consecutive_days: 3              # A2, B1 윈도우
+  accumulate_window: 5             # A3 누적 일수
+  volume_spike_ratio: 1.5          # A4 임계
+  pumped_return_pct: 15.0          # B2: 5일 누적 수익률 % 이상이면 급등
+  individual_strong_sell_ratio: 2.0 # B3: 개인 매도가 외국인 매도의 N배 이상
+  finance_only_ratio: 0.8          # B4: 금융투자 / 기관합계 비율
+  decoupling_pct_rank: 0.2         # A3: 상위/하위 20%
+
+# 시장
+markets:
+  - KOSPI
+  - KOSDAQ
+indices:
+  KOSPI200: "1028"
+  KOSDAQ150: "2203"
+
+# 해외 market_risk(risk-off) 게이트 임계 — [공격적] 2026-06-29 적용.
+# market_risk = vix_level > vix_max OR spy_ret5 < spy_ret5_min OR qqq_ret5 < qqq_ret5_min
+# 트리거 시 해외 후보 eligible=False. 국내 market_regime OFF와 정렬해 완화값으로 둠.
+overseas_market_risk:
+  vix_max: 40.0
+  spy_ret5_min: -8.0
+  qqq_ret5_min: -10.0
