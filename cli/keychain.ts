@@ -29,6 +29,17 @@ export const TELEGRAM_SERVICE = "telegram-bot";
 export const TELEGRAM_TOKEN_ACCOUNT = "stock-trader";
 export const TELEGRAM_CHATID_ACCOUNT = "stock-trader-chatid";
 
+/**
+ * The signal pipeline's own credentials, read by `load_signal_keys()` in
+ * `src/util/keychain.py`. The Python side looks each item up by these exact
+ * strings, so a rename on either side is a silent runtime "missing", never a
+ * compile error — `cli/__tests__/setup.test.ts` pins both halves together.
+ */
+export const SIGNAL_SERVICE = "signal-bot";
+export const KRX_ID_ACCOUNT = "krx-id";
+export const KRX_PW_ACCOUNT = "krx-pw";
+export const BRAVE_KEY_ACCOUNT = "brave-api-key";
+
 /** `security` is bounded so a blocked read fails the command instead of hanging a job. */
 const TIMEOUT_MS = 10_000;
 
