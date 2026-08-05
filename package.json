@@ -49,6 +49,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "tsc -p tsconfig.test.json && node --test \"dist-test/**/*.test.js\"",
+    "prepack": "find src -type d -name __pycache__ -prune -exec rm -rf {} +",
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {
