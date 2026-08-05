@@ -6,8 +6,8 @@
 - SL/TP / max_hold_days
 - key_thesis / key_risks
 
-실행 (자택 GUI 터미널):
-  cd ~/stock-trader && .venv/bin/python scripts/test_entry_decision.py
+실행 (프로젝트 루트에서):
+  .venv/bin/python scripts/test_entry_decision.py
 """
 from __future__ import annotations
 

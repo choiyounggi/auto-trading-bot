@@ -1,7 +1,7 @@
 """KIS REST API PoC — 잔고/시세 조회.
 
-실행 (자택 GUI 터미널):
-  cd ~/stock-trader && .venv/bin/python scripts/test_kis_balance.py
+실행 (프로젝트 루트에서):
+  .venv/bin/python scripts/test_kis_balance.py
 """
 from __future__ import annotations
 

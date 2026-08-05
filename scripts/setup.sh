@@ -27,4 +27,4 @@ echo "===4. 단위 테스트==="
 .venv/bin/pytest tests/
 
 echo "===완료==="
-echo "다음 단계: ~/Desktop/stock/10-tasks.md 참고"
+echo "다음 단계: kis-trader init"
