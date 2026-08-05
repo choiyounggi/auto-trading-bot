@@ -27,9 +27,19 @@ fresh `pip install -e ".[dev]"` produces a working signal pipeline.
    or `pip download --no-deps -d /dev/null <name>==<version>`. Record what you ran
    and its result; rule 3 exists because a wrong name is a supply-chain hole.
 4. Reinstall into the repo venv: `.venv/bin/pip install -e ".[dev]" -q`.
+5. **`tests/test_repo_hygiene.py::test_pyproject_leaves_everything_else_untouched`
+   pins the exact dependency list and will fail — that is the guard working, not a
+   bug.** Update *only* that one `assert project["dependencies"] == [...]` list to
+   include the six new entries in the order you appended them. Preserve the
+   assertion's purpose: it must still be an exact-list comparison, so a *seventh*
+   unintended dependency still fails it. Do not touch any other assertion in that
+   file, and do not relax `==` into a subset check.
+   (Plan repair, recorded during execution: this task's original scope forbade
+   touching `tests/`, which made its own Verify unsatisfiable.)
 
 ## Deliverables
 - `pyproject.toml` (modified)
+- `tests/test_repo_hygiene.py` (modified — one assertion, see step 5)
 
 ## Verify
 - `.venv/bin/python -c "import pykrx, pandas, numpy, bs4, lxml, yfinance; print('ok')"`
