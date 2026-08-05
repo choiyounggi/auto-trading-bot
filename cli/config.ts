@@ -21,7 +21,13 @@ export type Mode = (typeof MODES)[number];
 export const AGENTS = ["claude", "codex", "pi", "gemini"] as const;
 export type Agent = (typeof AGENTS)[number];
 
-export const JOB_KEYS = ["orchestrator", "monitor", "reconciler", "dipBuy"] as const;
+export const JOB_KEYS = [
+  "orchestrator",
+  "monitor",
+  "reconciler",
+  "dipBuy",
+  "usOrchestrator",
+] as const;
 export type JobName = (typeof JOB_KEYS)[number];
 
 /** Keys the user must supply. No defaults — see the module docstring. */
@@ -117,6 +123,7 @@ export function parseConfig(input: unknown): ParseResult {
     monitor: true,
     reconciler: true,
     dipBuy: true,
+    usOrchestrator: true,
   };
   if (input.jobs !== undefined) {
     if (!isPlainObject(input.jobs)) {

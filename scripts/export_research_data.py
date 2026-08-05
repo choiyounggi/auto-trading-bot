@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """paper 운용 연구 데이터 CSV export.
 
-실행:
-  cd ~/stock-trader
+실행 (프로젝트 루트에서):
   .venv/bin/python scripts/export_research_data.py
 
 출력:

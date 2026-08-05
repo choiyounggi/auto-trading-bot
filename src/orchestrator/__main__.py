@@ -21,7 +21,12 @@ from src.guardrails.rules import load_rules
 from src.notify.telegram import send_critical, send_info, send_warning
 from src.orchestrator.entry_decision import AccountSnapshot, select_entries
 from src.orchestrator.dip_buy import run_dip_buy
-from src.orchestrator.signal_loader import filter_buy_candidates, latest_signal_date, load_signal
+from src.orchestrator.signal_loader import (
+    filter_buy_candidates,
+    latest_signal_date,
+    load_signal,
+    resolve_signal_dir,
+)
 from src.storage.repository import Repo
 from src.util.keychain import load_kis_keys, load_telegram_keys
 
@@ -84,7 +89,7 @@ def run(argv: list[str] | None = None) -> int:
     import time as _time
     from datetime import date as _date
 
-    signal_dir = Path.home() / "stock-signal-bot" / "data" / "signals"
+    signal_dir = resolve_signal_dir()
     signal_suffix = ".us" if args.asset_class == "overseas_stock" else ""
 
     # carry-over: 오늘 신호는 16:30에야 생성되므로, 09:05 잡은 전일(최신) 신호로 진입한다.

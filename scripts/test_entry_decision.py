@@ -6,8 +6,8 @@
 - SL/TP / max_hold_days
 - key_thesis / key_risks
 
-실행 (자택 GUI 터미널):
-  cd ~/stock-trader && .venv/bin/python scripts/test_entry_decision.py
+실행 (프로젝트 루트에서):
+  .venv/bin/python scripts/test_entry_decision.py
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from src.orchestrator.entry_decision import (  # noqa: E402
     AccountSnapshot,
     evaluate_candidate,
 )
-from src.orchestrator.signal_loader import load_signal  # noqa: E402
+from src.orchestrator.signal_loader import load_signal, resolve_signal_dir  # noqa: E402
 from src.util.keychain import load_kis_keys, load_telegram_keys  # noqa: E402
 
 
@@ -37,7 +37,7 @@ def main() -> int:
 
     # 1주일 max_age로 lenient하게 — 오늘 또는 어제 JSON 모두 허용
     signals = load_signal(
-        signal_dir=Path.home() / "stock-signal-bot" / "data" / "signals",
+        signal_dir=resolve_signal_dir(),
         schema_path=Path("schemas/signal-v1.json"),
         max_age_min=60 * 24 * 7,  # 1주
     )

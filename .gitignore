@@ -39,3 +39,8 @@ node_modules/
 dist/
 dist-test/
 *.tgz
+.orchestration/
+.worktrees/
+
+# pip editable-install 산출물
+*.egg-info/
