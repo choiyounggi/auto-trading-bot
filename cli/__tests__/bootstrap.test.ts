@@ -64,12 +64,15 @@ function cfgFor(projectDir: string, pythonPath = PYTHON): Config {
     pythonPath,
     signalDir: join(projectDir, "data", "signals"),
     llmAgent: "claude",
+  newsLlmBackend: "none",
     jobs: {
       orchestrator: true,
       monitor: true,
       reconciler: true,
       dipBuy: true,
       usOrchestrator: true,
+    signalKr: true,
+    signalUs: true,
     },
   };
 }

@@ -136,9 +136,12 @@ function pad2(n: number): string {
 /** Human-readable form of a job's schedule, for the install question. */
 function scheduleSummary(job: JobKey): string {
   const schedule = JOBS[job].schedule;
-  return "intervalSec" in schedule
-    ? `every ${schedule.intervalSec}s`
-    : `daily ${pad2(schedule.hour)}:${pad2(schedule.minute)}`;
+  if ("intervalSec" in schedule) return `every ${schedule.intervalSec}s`;
+  // A job may run at several fixed times per weekday (`signalUs`: 22:35 and
+  // 23:35). Listing every one matters here — this string is what the user reads
+  // before agreeing to install the job.
+  const times = "times" in schedule ? schedule.times : [schedule];
+  return `daily ${times.map((t) => `${pad2(t.hour)}:${pad2(t.minute)}`).join(", ")}`;
 }
 
 /**
