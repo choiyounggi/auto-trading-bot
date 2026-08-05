@@ -292,9 +292,12 @@ def test_main_root_points_at_the_repo_root() -> None:
 def test_every_parents_index_resolves_to_the_repo_root() -> None:
     """이식 트리의 모든 `parents[N]` 이 저장소 루트를 가리켜야 한다.
 
-    5 곳 전부 루트 기준 경로(.env·config·data/cache·data/signals)를 만든다.
+    4 곳 전부 루트 기준 경로(.env·config·data/cache)를 만든다.
     한 곳이라도 +1 을 빠뜨리면 `src/` 안쪽을 가리키는데, 그중 셋은 import
     시점에 `mkdir` 까지 해버려서 조용히 잘못된 디렉터리를 만든다.
+
+    `data/signals` 는 더 이상 여기에 없다 — `dump_signals.py` 가
+    `resolve_signal_dir()`(KIS_TRADER_SIGNAL_DIR)로 해석한다.
     """
     sites: list[tuple[Path, int, int]] = []
     for path in ported_py_files():
@@ -304,7 +307,7 @@ def test_every_parents_index_resolves_to_the_repo_root() -> None:
             for m in PARENTS_RX.finditer(line):
                 sites.append((path, lineno, int(m.group(1))))
 
-    assert len(sites) >= 5, f"`parents[N]` 자리를 {len(sites)}개만 찾았다 — 검사가 공허하다"
+    assert len(sites) >= 4, f"`parents[N]` 자리를 {len(sites)}개만 찾았다 — 검사가 공허하다"
 
     wrong = [
         (p, n, idx)

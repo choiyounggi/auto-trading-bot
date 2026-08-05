@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
+
+from src.orchestrator.signal_loader import resolve_signal_dir
 
 log = logging.getLogger(__name__)
 
@@ -77,9 +80,7 @@ def dump_signals_json(
 
     stock-trader의 orchestrator가 이 JSON을 읽어 진입 결정.
     """
-    out_dir = Path(out_dir) if out_dir else (
-        Path(__file__).resolve().parents[3] / "data" / "signals"
-    )
+    out_dir = Path(out_dir) if out_dir else resolve_signal_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{today:%Y-%m-%d}{name_suffix}.json"
 
@@ -120,7 +121,16 @@ def dump_signals_json(
             "triggers": list(sig.triggers),
         })
 
-    out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 같은 디렉토리의 임시 파일에 쓴 뒤 os.replace — 트레이더가 반쯤 쓰인 파일을
+    # 읽는 일이 없어야 한다. 크로스 파일시스템 rename 은 원자적이지 않으므로
+    # 임시 파일은 반드시 목적지와 같은 디렉토리에 만든다.
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    try:
+        tmp_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp_path, out_path)
+    finally:
+        # 실패한 실행이 .tmp 를 남기면 트레이더가 훑는 디렉토리를 어지럽힌다.
+        tmp_path.unlink(missing_ok=True)
     log.info(
         "signal JSON 저장: %s (buys=%d, cautions=%d, strategy_signals=%d)",
         out_path, len(out["buys"]), len(out["cautions"]), len(out["strategy_signals"])
