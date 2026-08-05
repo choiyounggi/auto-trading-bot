@@ -11,7 +11,15 @@ import {
   type ProbeSpawn,
 } from "../doctor.js";
 import { JOB_KEYS, type Config } from "../config.js";
-import { KIS_SERVICE, kisAccount, KeychainLockedError } from "../keychain.js";
+import {
+  BRAVE_KEY_ACCOUNT,
+  KIS_SERVICE,
+  KRX_ID_ACCOUNT,
+  KRX_PW_ACCOUNT,
+  SIGNAL_SERVICE,
+  kisAccount,
+  KeychainLockedError,
+} from "../keychain.js";
 import { venvPython } from "../bootstrap.js";
 
 /**
@@ -136,7 +144,10 @@ test("all-healthy stubs: every check passes and the exit code is 0", () => {
       "database",
       "keychain-kis",
       "keychain-telegram",
+      "keychain-krx",
+      "keychain-brave",
       "llm-agent",
+      "news-backend",
       "signal-dir",
       "kis-api",
       ...JOB_KEYS.map((k) => `job:${k}`),
@@ -354,6 +365,113 @@ test("exactly one Telegram item present is a fail", () => {
   assert.equal(exitCodeFor(checks), 1);
 });
 
+// ------------------------------------------------------- keychain-krx / brave
+
+/** Every keychain item is present except the named accounts. */
+function keychainWithout(...absent: string[]): DoctorDeps["keychainHas"] {
+  return (_service, account) => !absent.includes(account);
+}
+
+test("both KRX items present passes and reads them from the signal service", () => {
+  const asked: [string, string][] = [];
+  const checks = runDoctor(
+    healthy({
+      keychainHas: (service, account) => {
+        asked.push([service, account]);
+        return true;
+      },
+    }),
+  );
+
+  const krx = get(checks, "keychain-krx");
+  assert.equal(krx.status, "pass");
+  assert.equal(krx.hint, undefined);
+  assert.ok(
+    asked.some(([s, a]) => s === SIGNAL_SERVICE && a === KRX_ID_ACCOUNT),
+    JSON.stringify(asked),
+  );
+  assert.ok(asked.some(([s, a]) => s === SIGNAL_SERVICE && a === KRX_PW_ACCOUNT));
+});
+
+test("neither KRX item present is a warn that keeps the exit code 0", () => {
+  const checks = runDoctor(
+    healthy({ keychainHas: keychainWithout(KRX_ID_ACCOUNT, KRX_PW_ACCOUNT) }),
+  );
+  const krx = get(checks, "keychain-krx");
+  assert.equal(krx.status, "warn");
+  assert.ok(/unauthenticated/i.test(krx.detail), krx.detail);
+  assert.ok(krx.hint);
+  assert.equal(exitCodeFor(checks), 0);
+});
+
+test("only the KRX id present fails and names the missing password account", () => {
+  const checks = runDoctor(healthy({ keychainHas: keychainWithout(KRX_PW_ACCOUNT) }));
+  const krx = get(checks, "keychain-krx");
+  assert.equal(krx.status, "fail");
+  assert.ok(krx.detail.includes(KRX_PW_ACCOUNT), krx.detail);
+  assert.ok(!krx.detail.includes(KRX_ID_ACCOUNT), krx.detail);
+  assert.ok(krx.hint);
+  assert.equal(exitCodeFor(checks), 1);
+});
+
+test("only the KRX password present fails and names the missing id account", () => {
+  const checks = runDoctor(healthy({ keychainHas: keychainWithout(KRX_ID_ACCOUNT) }));
+  const krx = get(checks, "keychain-krx");
+  assert.equal(krx.status, "fail");
+  assert.ok(krx.detail.includes(KRX_ID_ACCOUNT), krx.detail);
+  assert.equal(exitCodeFor(checks), 1);
+});
+
+test("an absent Brave key is a warn about news enrichment, never a fail", () => {
+  const checks = runDoctor(healthy({ keychainHas: keychainWithout(BRAVE_KEY_ACCOUNT) }));
+  const brave = get(checks, "keychain-brave");
+  assert.equal(brave.status, "warn");
+  assert.ok(/news/i.test(brave.detail), brave.detail);
+  assert.ok(brave.hint);
+  assert.equal(exitCodeFor(checks), 0);
+});
+
+test("a present Brave key passes and is read from the signal service", () => {
+  const asked: [string, string][] = [];
+  const checks = runDoctor(
+    healthy({
+      keychainHas: (service, account) => {
+        asked.push([service, account]);
+        return true;
+      },
+    }),
+  );
+  assert.equal(get(checks, "keychain-brave").status, "pass");
+  assert.ok(asked.some(([s, a]) => s === SIGNAL_SERVICE && a === BRAVE_KEY_ACCOUNT));
+});
+
+test("every optional signal credential absent leaves the command succeeding", () => {
+  const checks = runDoctor(
+    healthy({
+      keychainHas: keychainWithout(KRX_ID_ACCOUNT, KRX_PW_ACCOUNT, BRAVE_KEY_ACCOUNT),
+    }),
+  );
+  assert.equal(get(checks, "keychain-krx").status, "warn");
+  assert.equal(get(checks, "keychain-brave").status, "warn");
+  assert.equal(exitCodeFor(checks), 0);
+});
+
+test("a locked keychain reports the signal checks instead of crashing", () => {
+  const checks = runDoctor(
+    healthy({
+      keychainHas: () => {
+        throw new KeychainLockedError();
+      },
+    }),
+  );
+  for (const name of ["keychain-krx", "keychain-brave"]) {
+    const check = get(checks, name);
+    assert.equal(check.status, "fail", name);
+    assert.ok(check.detail.includes("-25308"), check.detail);
+    assert.ok(check.hint?.toLowerCase().includes("unlock"), check.hint);
+  }
+});
+
 // ------------------------------------------------------------------ llm-agent
 
 test("the configured agent being absent while another exists is a warn", () => {
@@ -390,14 +508,79 @@ test("a detected agent reports its path", () => {
   assert.ok(get(checks, "llm-agent").detail.includes("/usr/local/bin/claude"));
 });
 
+// --------------------------------------------------------------- news-backend
+
+/** No LLM CLI exists on this machine at all. */
+const NO_AGENTS: ReturnType<DoctorDeps["detectAgents"]> = {
+  claude: null,
+  codex: null,
+  pi: null,
+  gemini: null,
+};
+
+test('newsLlmBackend "none" passes even when no agent was detected', () => {
+  const checks = runDoctor(
+    healthy({ detectAgents: () => NO_AGENTS }, cfg({ newsLlmBackend: "none" })),
+  );
+  const news = get(checks, "news-backend");
+  assert.equal(news.status, "pass");
+  assert.ok(/no LLM cost/i.test(news.detail), news.detail);
+  assert.equal(news.hint, undefined);
+});
+
+test("a configured news backend that is installed passes and reports its path", () => {
+  const checks = runDoctor(
+    healthy(
+      {
+        detectAgents: () => ({
+          ...NO_AGENTS,
+          claude: { path: "/usr/local/bin/claude", version: "1.2.3" },
+          codex: { path: "/usr/local/bin/codex", version: null },
+        }),
+      },
+      cfg({ newsLlmBackend: "codex" }),
+    ),
+  );
+  const news = get(checks, "news-backend");
+  assert.equal(news.status, "pass");
+  assert.ok(news.detail.includes("codex"), news.detail);
+  assert.ok(news.detail.includes("/usr/local/bin/codex"), news.detail);
+  assert.equal(exitCodeFor(checks), 0);
+});
+
+test("a configured news backend whose binary is missing fails", () => {
+  // `llmAgent` still resolves, so the failure can only come from news-backend.
+  const checks = runDoctor(healthy({}, cfg({ newsLlmBackend: "codex" })));
+
+  assert.equal(get(checks, "llm-agent").status, "pass");
+  const news = get(checks, "news-backend");
+  assert.equal(news.status, "fail");
+  assert.ok(news.detail.includes("codex"), news.detail);
+  assert.ok(news.hint?.includes("none"), news.hint);
+  assert.equal(exitCodeFor(checks), 1);
+});
+
+test("the news backend is resolved independently of the trading llmAgent", () => {
+  const checks = runDoctor(
+    healthy(
+      {
+        detectAgents: () => ({ ...NO_AGENTS, pi: { path: "/usr/local/bin/pi", version: null } }),
+      },
+      cfg({ llmAgent: "claude", newsLlmBackend: "pi" }),
+    ),
+  );
+  assert.equal(get(checks, "llm-agent").status, "warn");
+  assert.equal(get(checks, "news-backend").status, "pass");
+});
+
 // ----------------------------------------------------------------- signal-dir
 
-test("a missing signal directory fails and names it plus stock-signal-bot", () => {
+test("a missing signal directory fails and names it plus the producer command", () => {
   const checks = runDoctor(healthy({ signalEntries: () => null }));
   const dir = get(checks, "signal-dir");
   assert.equal(dir.status, "fail");
   assert.ok(dir.hint?.includes(SIGNAL_DIR), dir.hint);
-  assert.ok(dir.hint?.includes("stock-signal-bot"), dir.hint);
+  assert.ok(dir.hint?.includes("kis-trader start signalKr"), dir.hint);
   assert.equal(exitCodeFor(checks), 1);
 });
 
@@ -405,8 +588,27 @@ test("an existing but empty signal directory is a warn, not a fail", () => {
   const checks = runDoctor(healthy({ signalEntries: () => [] }));
   const dir = get(checks, "signal-dir");
   assert.equal(dir.status, "warn");
-  assert.ok(dir.hint);
+  assert.ok(dir.hint?.includes("kis-trader start signalKr"), dir.hint);
   assert.equal(exitCodeFor(checks), 0);
+});
+
+test("no signal-dir hint still sends the user to the separate stock-signal-bot project", () => {
+  // The producer ships in this package now; naming an external project as the
+  // prerequisite would send the user to install something they already have.
+  const hints = [
+    runDoctor(healthy({ signalEntries: () => null })),
+    runDoctor(healthy({ signalEntries: () => [] })),
+    runDoctor(
+      healthy({ signalEntries: () => [{ name: "kospi.json", mtimeMs: NOW - 100 * HOUR }] }),
+    ),
+  ].map((checks) => get(checks, "signal-dir"));
+
+  for (const dir of hints) {
+    assert.notEqual(dir.status, "pass", dir.detail);
+    assert.ok(dir.hint, `${dir.status} check has no hint`);
+    assert.ok(!dir.hint!.includes("stock-signal-bot"), dir.hint);
+    assert.ok(dir.hint!.includes("kis-trader start signalKr"), dir.hint);
+  }
 });
 
 test("a signal 71 h old passes and 73 h old warns, judged by the injected clock", () => {
@@ -652,6 +854,31 @@ test("every job key gets its own check", () => {
     checks.filter((c) => c.name.startsWith("job:")).map((c) => c.name),
     JOB_KEYS.map((k) => `job:${k}`),
   );
+});
+
+test("the job loop covers all seven jobs, including the two signal jobs", () => {
+  const checks = runDoctor(healthy());
+  const names = checks.filter((c) => c.name.startsWith("job:")).map((c) => c.name);
+  assert.equal(JOB_KEYS.length, 7);
+  assert.equal(names.length, 7);
+  assert.ok(names.includes("job:signalKr"), names.join(","));
+  assert.ok(names.includes("job:signalUs"), names.join(","));
+});
+
+test("an enabled signal job that is absent fails, a disabled one only warns", () => {
+  const absentSignalKr = { jobStatus: (job: string) => (job === "signalKr" ? "absent" as const : "loaded" as const) };
+
+  const enabled = runDoctor(healthy(absentSignalKr, cfg({ jobs: { ...cfg().jobs, signalKr: true } })));
+  const failing = get(enabled, "job:signalKr");
+  assert.equal(failing.status, "fail");
+  assert.ok(failing.hint);
+  assert.equal(exitCodeFor(enabled), 1);
+
+  const disabled = runDoctor(healthy(absentSignalKr, cfg({ jobs: { ...cfg().jobs, signalKr: false } })));
+  const warning = get(disabled, "job:signalKr");
+  assert.equal(warning.status, "warn");
+  assert.ok(warning.hint?.includes("signalKr"), warning.hint);
+  assert.equal(exitCodeFor(disabled), 0);
 });
 
 // ------------------------------------------------------------------ exit code
