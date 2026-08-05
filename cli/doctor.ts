@@ -40,7 +40,11 @@ import {
 } from "./config.js";
 import { venvPython } from "./bootstrap.js";
 import {
+  BRAVE_KEY_ACCOUNT,
   KIS_SERVICE,
+  KRX_ID_ACCOUNT,
+  KRX_PW_ACCOUNT,
+  SIGNAL_SERVICE,
   TELEGRAM_CHATID_ACCOUNT,
   TELEGRAM_SERVICE,
   TELEGRAM_TOKEN_ACCOUNT,
@@ -347,7 +351,59 @@ export function runDoctor(deps: Partial<DoctorDeps> = {}): Check[] {
     add("keychain-telegram", "fail", detail, hint);
   }
 
-  // 7. llm-agent
+  // 7. keychain-krx — the signal producer's KRX login. Optional as a pair: KRX
+  //    serves the same listings unauthenticated, so absence degrades the
+  //    producer rather than breaking it (D4). One half is neither state — it is
+  //    a setup that was interrupted, and it fails at the first authenticated
+  //    fetch, so it is reported now.
+  try {
+    const krx: [string, boolean][] = [
+      [KRX_ID_ACCOUNT, d.keychainHas(SIGNAL_SERVICE, KRX_ID_ACCOUNT)],
+      [KRX_PW_ACCOUNT, d.keychainHas(SIGNAL_SERVICE, KRX_PW_ACCOUNT)],
+    ];
+    const missing = krx.filter(([, has]) => !has).map(([account]) => account);
+    if (missing.length === 0) {
+      add("keychain-krx", "pass", "KRX id and password stored for the signal producer");
+    } else if (missing.length === krx.length) {
+      add(
+        "keychain-krx",
+        "warn",
+        "not configured — the signal bot falls back to unauthenticated KRX access",
+        "optional: run kis-trader init to store the KRX id and password",
+      );
+    } else {
+      add(
+        "keychain-krx",
+        "fail",
+        `half configured — missing from the ${SIGNAL_SERVICE} keychain service: ${missing.join(", ")}`,
+        HINT_INIT,
+      );
+    }
+  } catch (err) {
+    // A locked keychain is not an absent credential: it says nothing about what
+    // is stored, so it cannot be softened to the optional-is-fine warn above.
+    const { detail, hint } = keychainFailure(err);
+    add("keychain-krx", "fail", detail, hint);
+  }
+
+  // 8. keychain-brave — a single optional item, so absent is simply off (D4).
+  try {
+    if (d.keychainHas(SIGNAL_SERVICE, BRAVE_KEY_ACCOUNT)) {
+      add("keychain-brave", "pass", "Brave Search API key stored");
+    } else {
+      add(
+        "keychain-brave",
+        "warn",
+        "not configured — news enrichment is disabled",
+        "optional: run kis-trader init to add the Brave Search API key",
+      );
+    }
+  } catch (err) {
+    const { detail, hint } = keychainFailure(err);
+    add("keychain-brave", "fail", detail, hint);
+  }
+
+  // 9. llm-agent
   const agents = d.detectAgents();
   const configured = agents[cfg.llmAgent];
   const found = (Object.keys(agents) as SupportedCli[]).filter((k) => agents[k] !== null);
@@ -370,22 +426,46 @@ export function runDoctor(deps: Partial<DoctorDeps> = {}): Check[] {
     );
   }
 
-  // 8. signal-dir — existence *and* freshness (D12). A directory that exists
-  //    but stopped being written to looks healthy to `existsSync` and is not.
+  // 10. news-backend — the producer's news enrichment. Its binary is resolved
+  //     from the same detection pass as `llm-agent`: they are independent
+  //     settings, so the configured backend is looked up on its own. "none" is
+  //     a deliberate choice, not a gap; anything else that is not installed
+  //     produces no news signal at all and never says so at runtime.
+  if (cfg.newsLlmBackend === "none") {
+    add("news-backend", "pass", "disabled (no LLM cost)");
+  } else {
+    const backend = agents[cfg.newsLlmBackend];
+    if (backend) {
+      const backendVersion = backend.version === null ? "" : ` (${backend.version})`;
+      add("news-backend", "pass", `${cfg.newsLlmBackend} at ${backend.path}${backendVersion}`);
+    } else {
+      add(
+        "news-backend",
+        "fail",
+        `${cfg.newsLlmBackend} is configured for news enrichment but not installed`,
+        `install ${cfg.newsLlmBackend}, or set newsLlmBackend to "none" to disable news enrichment`,
+      );
+    }
+  }
+
+  // 11. signal-dir — existence *and* freshness (D12). A directory that exists
+  //     but stopped being written to looks healthy to `existsSync` and is not.
+  //     The producer ships in this package, so every hint names the command
+  //     that writes a file on demand rather than an external project.
   const entries = d.signalEntries(cfg.signalDir);
   if (entries === null) {
     add(
       "signal-dir",
       "fail",
       `no directory at ${cfg.signalDir}`,
-      `create ${cfg.signalDir} — signals are produced by the separate stock-signal-bot project`,
+      `create ${cfg.signalDir}, then run: kis-trader start signalKr`,
     );
   } else if (entries.length === 0) {
     add(
       "signal-dir",
       "warn",
       `${cfg.signalDir} exists but is empty`,
-      `no signals yet — the separate stock-signal-bot project writes them to ${cfg.signalDir}`,
+      `no signals yet — run: kis-trader start signalKr to write one into ${cfg.signalDir}`,
     );
   } else {
     const newest = entries.reduce((a, b) => (b.mtimeMs > a.mtimeMs ? b : a));
@@ -398,12 +478,12 @@ export function runDoctor(deps: Partial<DoctorDeps> = {}): Check[] {
         "signal-dir",
         "warn",
         detail,
-        `signals are stale — check the separate stock-signal-bot project that writes ${cfg.signalDir}`,
+        `signals are stale — run: kis-trader start signalKr to refresh ${cfg.signalDir}`,
       );
     }
   }
 
-  // 9. kis-api — a real round trip, run inside the venv so the credentials stay
+  // 12. kis-api — a real round trip, run inside the venv so the credentials stay
   //    in the Python process (D18). Nothing is spawned without an interpreter
   //    to spawn: a missing venv is already reported above.
   if (!venvOk) {
@@ -486,9 +566,12 @@ export function runDoctor(deps: Partial<DoctorDeps> = {}): Check[] {
     }
   }
 
-  // 10. jobs — one per key in the config schema, which is the job inventory
-  //     (WIKI infrastructure-config-environment-config rule 4). `absent` means
-  //     something different depending on whether the user asked for the job.
+  // 13. jobs — one per key in the config schema, which is the job inventory
+  //     (WIKI infrastructure-config-environment-config rule 4), so the two
+  //     signal jobs are reported by the same loop, from `launchctl` itself
+  //     (WIKI platforms-processes-background-services rule 4) rather than from
+  //     an install command's exit code. `absent` means something different
+  //     depending on whether the user asked for the job.
   for (const key of JOB_KEYS as readonly JobName[]) {
     const label = labelFor(key);
     const status = d.jobStatus(key);
