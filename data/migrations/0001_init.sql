@@ -53,7 +53,7 @@ CREATE INDEX IF NOT EXISTS idx_positions_ticker ON positions(ticker);
 CREATE INDEX IF NOT EXISTS idx_positions_entry_at ON positions(entry_at);
 
 -- ============================================================
--- orders — 키움 주문 추적
+-- orders — KIS(한국투자증권) 주문 추적
 -- ============================================================
 CREATE TABLE IF NOT EXISTS orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

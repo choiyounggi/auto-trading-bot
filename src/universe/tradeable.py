@@ -18,7 +18,7 @@ class TradeabilityCheck:
 
 
 async def check_tradeable(
-    client,  # KiwoomMcpClient
+    client,  # KisClient (src.broker.kis_client)
     ticker: str,
     min_market_cap_eok: int = 5000,
     exclude_tickers: set[str] | None = None,
