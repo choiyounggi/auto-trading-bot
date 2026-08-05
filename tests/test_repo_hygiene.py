@@ -25,6 +25,11 @@ SKIP_DIRS = {
     ".git",
     ".venv",
     ".orchestration",
+    # 오케스트레이션이 만드는 태스크별 git 워크트리. gitignore 대상이고 배포
+    # 패키지에도 사용자 클론에도 없다. 각 워크트리는 자기 분기 시점의 스냅샷이라
+    # 태스크 15 의 삭제 이전 파일을 그대로 들고 있어, 빼지 않으면 이 스캔이
+    # 지나간 상태를 현재 위반으로 보고한다.
+    ".worktrees",
     ".pytest_cache",
     "__pycache__",
     "node_modules",
