@@ -1,4 +1,4 @@
-"""macOS Keychain 조회 wrapper + KIS(한국투자증권)/Telegram 키 자동 inject."""
+"""macOS Keychain 조회 wrapper + KIS(한국투자증권)/Telegram/신호봇 키 자동 inject."""
 from __future__ import annotations
 
 import logging
@@ -6,6 +6,8 @@ import os
 import subprocess
 
 log = logging.getLogger(__name__)
+
+SIGNAL_SERVICE = "signal-bot"
 
 
 def keychain_get(service: str, account: str) -> str | None:
@@ -82,6 +84,35 @@ def load_telegram_keys() -> dict:
             loaded[env_var] = "already-set"
             continue
         v = keychain_get(svc, acct)
+        if v:
+            os.environ[env_var] = v
+            loaded[env_var] = f"keychain ({len(v)} chars)"
+        else:
+            loaded[env_var] = "missing"
+    return loaded
+
+
+def load_signal_keys() -> dict:
+    """Keychain에서 신호 봇 키 → os.environ 자동 inject.
+
+    KRX 로그인과 Brave 키는 **선택**이다 — 없으면 신호 봇이 기능을 줄여
+    동작하므로 예외를 올리지 않고 'missing' 으로만 보고한다.
+    """
+    loaded: dict = {}
+    mapping = {
+        "KRX_ID":               "krx-id",
+        "KRX_PW":               "krx-pw",
+        "BRAVE_SEARCH_API_KEY": "brave-api-key",
+    }
+    for env_var, acct in mapping.items():
+        if os.environ.get(env_var):
+            loaded[env_var] = "already-set"
+            continue
+        try:
+            v = keychain_get(SIGNAL_SERVICE, acct)
+        except Exception as e:  # 조회 실패는 degrade — 신호 봇을 멈추지 않는다
+            log.warning("keychain 조회 실패 (%s/%s): %s", SIGNAL_SERVICE, acct, e)
+            v = None
         if v:
             os.environ[env_var] = v
             loaded[env_var] = f"keychain ({len(v)} chars)"
