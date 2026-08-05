@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -8,6 +8,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, userInfo } from "node:os";
@@ -17,9 +18,11 @@ import { fileURLToPath } from "node:url";
 import { JOB_KEYS, type Config } from "../config.js";
 import {
   JOBS,
+  guardScript,
   installJob,
   jobStatus,
   labelFor,
+  lockPath,
   plistPath,
   renderPlist,
   uninstallJob,
@@ -47,12 +50,15 @@ const CFG: Config = {
   pythonPath: "/abs/python3.11",
   signalDir: "/Users/alice/.kis-trader/signals",
   llmAgent: "claude",
+  newsLlmBackend: "none",
   jobs: {
     orchestrator: true,
     monitor: true,
     reconciler: true,
     dipBuy: true,
     usOrchestrator: true,
+    signalKr: true,
+    signalUs: true,
   },
 };
 
@@ -595,4 +601,182 @@ test("jobStatus answers for every job key without touching the machine", () => {
       assert.equal(status, "absent");
     }
   });
+});
+
+// ── signal jobs: multi-time schedules and the overlap guard ────────────
+
+/** Count of `<key>Weekday</key>` entries — one per (weekday × time). */
+function weekdayCount(xml: string): number {
+  return xml.split("<key>Weekday</key>").length - 1;
+}
+
+test("signalKr runs on the five weekdays at 16:30, ahead of the 16:45 trader", () => {
+  const xml = renderPlist("signalKr", CFG, HOME_STR, "tester");
+  assert.equal(weekdayCount(xml), 5);
+  assert.match(xml, /<key>Hour<\/key><integer>16<\/integer><key>Minute<\/key><integer>30<\/integer>/);
+  // The gap to the orchestrator is the whole point: the producer must finish
+  // before the consumer reads.
+  const orch = JOBS.orchestrator.schedule;
+  assert.ok("hour" in orch && orch.hour === 9, "orchestrator's own schedule is unchanged");
+  assertParses(xml);
+});
+
+test("signalUs emits one entry per weekday per time — 5 x 2 = 10", () => {
+  const xml = renderPlist("signalUs", CFG, HOME_STR, "tester");
+  assert.equal(weekdayCount(xml), 10);
+  assert.match(xml, /<key>Hour<\/key><integer>22<\/integer><key>Minute<\/key><integer>35<\/integer>/);
+  assert.match(xml, /<key>Hour<\/key><integer>23<\/integer><key>Minute<\/key><integer>35<\/integer>/);
+  assertParses(xml);
+});
+
+test("the single-time and interval forms render exactly as before", () => {
+  // Regression guard on the schedule refactor: adding the `times` form must not
+  // change what the five existing jobs emit.
+  const single = renderPlist("orchestrator", CFG, HOME_STR, "tester");
+  assert.equal(weekdayCount(single), 5);
+  assert.match(single, /<key>Hour<\/key><integer>9<\/integer><key>Minute<\/key><integer>5<\/integer>/);
+
+  const interval = renderPlist("monitor", CFG, HOME_STR, "tester");
+  assert.equal(weekdayCount(interval), 0);
+  assert.match(interval, /<key>StartInterval<\/key>\s*<integer>300<\/integer>/);
+  assert.doesNotMatch(interval, /StartCalendarInterval/);
+});
+
+test("a guarded job runs under sh with the lock, the stale reclaim and a trap", () => {
+  const xml = renderPlist("signalKr", CFG, HOME_STR, "tester");
+  assert.match(xml, /<string>\/bin\/sh<\/string>/);
+  assert.match(xml, /<string>-c<\/string>/);
+
+  const script = guardScript("signalKr", CFG, HOME_STR);
+  assert.ok(script.includes(lockPath("signalKr", HOME_STR)), "the lock path must be in the script");
+  assert.match(script, /mkdir "\$L"/, "mkdir is the lock — it is atomic on POSIX");
+  assert.match(script, /-mmin \+15/, "a crashed run must not hold the lock forever");
+  assert.match(script, /trap '.*rmdir/, "the normal path releases the lock");
+  assert.ok(script.includes(CFG.pythonPath), "the interpreter is the configured absolute path");
+  assert.doesNotMatch(script, /\bpython3\b(?!\.)/, "never a bare python3");
+});
+
+test("the guard uses only tools that ship with macOS", () => {
+  // Measured on a stock Mac: /usr/bin/flock and /usr/bin/timeout do not exist,
+  // and the Homebrew timeout is only present where coreutils was installed —
+  // which a package shipped to arbitrary Macs cannot assume.
+  for (const job of ["signalKr", "signalUs"] as const) {
+    const script = guardScript(job, CFG, HOME_STR);
+    assert.doesNotMatch(script, /flock/, `${job} must not depend on flock`);
+    assert.doesNotMatch(script, /timeout/, `${job} must not depend on timeout`);
+  }
+});
+
+test("only the signal jobs are guarded; the trading jobs keep their argv", () => {
+  for (const job of JOB_KEYS) {
+    const xml = renderPlist(job, CFG, HOME_STR, "tester");
+    const guarded = job === "signalKr" || job === "signalUs";
+    assert.equal(
+      xml.includes("<string>/bin/sh</string>"),
+      guarded,
+      `${job} guarded should be ${guarded}`,
+    );
+    if (!guarded) {
+      assert.ok(xml.includes(`<string>${CFG.pythonPath}</string>`), `${job} calls python directly`);
+    }
+  }
+});
+
+test("every job, including the new two, renders a plist plutil accepts", () => {
+  for (const job of JOB_KEYS) assertParses(renderPlist(job, CFG, HOME_STR, "tester"));
+});
+
+test("a lock path with a quote cannot break out of the shell script", () => {
+  // The home directory is user-supplied via KIS_TRADER_HOME.
+  const nasty = "/tmp/it's a home";
+  const script = guardScript("signalKr", CFG, nasty);
+  assert.ok(script.includes(`'\\''`), "the quote is escaped for sh, not left bare");
+  assert.doesNotMatch(script, /L='\/tmp\/it's/, "an unescaped quote would end the string early");
+});
+
+test("the guard does not exec — exec would discard the trap and orphan the lock", () => {
+  // Measured: with `exec <cmd>` the shell is replaced, the EXIT trap never
+  // fires, and a *successful* run leaves its lock directory behind. The job
+  // then only starts again once the staleness window has passed, which for a
+  // job scheduled twice an hour would silently drop runs.
+  for (const job of ["signalKr", "signalUs"] as const) {
+    const script = guardScript(job, CFG, HOME_STR);
+    assert.doesNotMatch(script, /\bexec\b/, `${job}'s guard must not exec`);
+    // The trap must still be there, and before the command it protects.
+    const trapAt = script.indexOf("trap ");
+    const cmdAt = script.indexOf(CFG.pythonPath);
+    assert.ok(trapAt >= 0, "the release trap is present");
+    assert.ok(cmdAt > trapAt, "the trap is armed before the command runs");
+  }
+});
+
+// ── the guard, executed rather than pattern-matched ────────────────────
+
+/**
+ * Run a guard script whose payload is a stub, so the lock semantics are
+ * exercised for real instead of asserted against a string this file controls.
+ *
+ * The string tests above catch a *textual* regression (someone reintroducing
+ * `exec`). These catch a *semantic* one — a rewrite that still contains all the
+ * right substrings but no longer skips, or no longer releases.
+ */
+function runGuard(home: string, payload: string): { code: number; out: string } {
+  const script = guardScript("signalKr", CFG, home).replace(
+    // Replace the quoted interpreter+args tail with the stub payload.
+    /'[^']*python[^']*'.*$/,
+    payload,
+  );
+  const r = spawnSync("/bin/sh", ["-c", script], { encoding: "utf8" });
+  return { code: r.status ?? -1, out: (r.stdout ?? "").trim() };
+}
+
+test("guard: a second run while the first holds the lock skips instead of overlapping", () => {
+  const home = mkdtempSync(join(SCRATCH_ROOT, "guard-"));
+  mkdirSync(join(home, "locks"), { recursive: true });
+  // Take the lock the way the guard does, then attempt a run.
+  mkdirSync(lockPath("signalKr", home));
+  const second = runGuard(home, "echo RAN");
+  assert.equal(second.out, "", "the payload must not run while the lock is held");
+  assert.equal(second.code, 0, "a skip is a success, not a failure — launchd must not retry it");
+});
+
+test("guard: a completed run releases its lock, so the next run proceeds", () => {
+  const home = mkdtempSync(join(SCRATCH_ROOT, "guard-"));
+  mkdirSync(join(home, "locks"), { recursive: true });
+
+  const first = runGuard(home, "echo RAN");
+  assert.equal(first.out, "RAN");
+  assert.equal(
+    existsSync(lockPath("signalKr", home)),
+    false,
+    "the lock must be gone — this is what `exec` used to break",
+  );
+
+  const second = runGuard(home, "echo AGAIN");
+  assert.equal(second.out, "AGAIN", "a released lock lets the next run through");
+});
+
+test("guard: a lock older than the window is reclaimed rather than blocking forever", () => {
+  const home = mkdtempSync(join(SCRATCH_ROOT, "guard-"));
+  const lock = lockPath("signalKr", home);
+  mkdirSync(join(home, "locks"), { recursive: true });
+  mkdirSync(lock);
+  // Age it past STALE_LOCK_MINUTES (15) — as a crashed run would leave it.
+  const old = new Date(Date.now() - 20 * 60 * 1000);
+  utimesSync(lock, old, old);
+
+  const r = runGuard(home, "echo RECLAIMED");
+  assert.equal(r.out, "RECLAIMED", "a dead run's lock must not block the schedule forever");
+});
+
+test("guard: the job's own exit status survives the wrapper", () => {
+  const home = mkdtempSync(join(SCRATCH_ROOT, "guard-"));
+  mkdirSync(join(home, "locks"), { recursive: true });
+  // launchd records this; a wrapper that swallowed it would hide every failure.
+  assert.equal(runGuard(home, "exit 3").code, 3);
+  assert.equal(
+    existsSync(lockPath("signalKr", home)),
+    false,
+    "a failing run still releases its lock",
+  );
 });

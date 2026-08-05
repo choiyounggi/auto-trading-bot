@@ -45,7 +45,7 @@ Measured facts this plan rests on (verified 2026-08-05, not assumed):
 | D4 | Missing KRX / Brave behaviour | **Degrade, do not crash.** Both are measured-optional. `doctor` reports their absence as `warn`, never `fail`. This is deliberate divergence from the "required keys crash at startup" rule: these keys are genuinely optional inputs, so making them required would break a working configuration. | infrastructure-config-environment-config (rule 5 — and its limit: the rule governs *required* keys) |
 | D5 | Signal output location | `dump_signals_json` resolves its out-dir from `KIS_TRADER_SIGNAL_DIR`, falling back to `<projectDir>/data/signals` — the same resolver the trader reads through. `init`'s default for `signalDir` changes from `~/stock-signal-bot/data/signals` to `<projectDir>/data/signals`. This is what closes the loop. | infrastructure-config-environment-config (rule 2) |
 | D6 | Partial-read hazard | `dump_signals_json` writes to `<name>.tmp` in the destination directory then `os.replace()`s it into place. The signal job at 16:30 can still be writing when the trader reads at 16:45; a plain `write_text` lets the trader parse a truncated JSON. `os.replace` is atomic within a filesystem. | backend-common-jobs-scheduled-job-overlap (rules 1, 3 — assume overlap; bound the run) |
-| D7 | Signal job overlap + hang | Each signal job's `ProgramArguments` wraps the interpreter in `/usr/bin/timeout` so a hung run cannot block the next schedule, and the run takes a `flock`-style lockfile under the state dir so two runs never overlap. Bound: **900 s** for KR, **900 s** for US. | backend-common-jobs-scheduled-job-overlap (rules 1–3) |
+| D7 | Signal job overlap + hang | **Revised after measurement**: `/usr/bin/flock` and `/usr/bin/timeout` do not exist on macOS, and `/opt/homebrew/bin/timeout` only exists where Homebrew coreutils is installed — a package shipped to arbitrary Macs cannot depend on it. The guard is therefore stock-only `sh`: `mkdir` (atomic on POSIX) is the lock so a second run exits 0 immediately, and a `find -mmin +15` staleness reclaim is the hang guard, without which one crashed run leaves the lock forever and every later schedule silently skips. `trap … EXIT` releases it. | backend-common-jobs-scheduled-job-overlap (rules 1–3) |
 | D8 | Multi-time schedules | `JobSpec.schedule` gains a `times: {hour, minute}[]` form; `renderPlist` emits one `StartCalendarInterval` dict per (weekday × time). `signalUs` uses `[{22,35},{23,35}]` → 10 dicts. The existing single-time and `intervalSec` forms keep working unchanged. | platforms-processes-background-services (macOS `StartCalendarInterval` row) |
 | D9 | News LLM backend | New config key `newsLlmBackend`, allowed `none\|claude\|codex\|pi`, **default `none`** (zero cost). Deliberately *not* derived from `llmAgent`: `llmAgent` picks the model that makes trading decisions, this one only classifies news headlines, and collapsing them would silently start billing the trading agent for enrichment work. | infrastructure-config-environment-config (rule 2 — a named value per behaviour) |
 | D10 | New Python dependencies | Add `pykrx>=1.0.45`, `pandas>=2.0`, `numpy>=1.24`, `beautifulsoup4>=4.12`, `lxml>=5.0`, `yfinance>=0.2`. `pyyaml`, `requests`, `python-dotenv` are already present. Each is a protocol client or parser — code you must not hand-roll. They install at `init` time via pip, so the npm tarball is unaffected. | security-dependencies-supply-chain (rule 2 add-vs-write; rule 3 verify exact names) |
@@ -77,11 +77,10 @@ editing one file is the failure mode this column exists to prevent.
 | 10-signal-config-files | — | 1 | `config/{thresholds.yaml,watchlist.txt,overseas_watchlist.yaml}` |
 | 04-atomic-signal-write | 01 | 2 | `src/signal/data/dump_signals.py`, `tests/test_dump_signals_atomic.py` |
 | 05-signal-entry-credentials | 01, 03 | 2 | `src/signal/main.py`, `tests/test_signal_entry_credentials.py` |
-| 06-config-cli-keys | — | 3 | `cli/config.ts`, `cli/__tests__/config.test.ts` |
+| 06-config-and-launchd | — | 3 | `cli/config.ts`, `cli/launchd.ts` + their tests, and the `jobs` literals in `bootstrap.test.ts`/`doctor.test.ts` |
 | 11-schema-conformance-test | 01, 04 | 3 | `tests/test_signal_schema_contract.py` |
-| 07-launchd-signal-jobs | 06 | 4 | `cli/launchd.ts`, `cli/__tests__/launchd.test.ts` |
-| 08-init-signal-onboarding | 03, 05, 06, 07 | 5 | `cli/setup.ts`, `cli/keychain.ts`, `cli/__tests__/setup.test.ts` |
-| 09-doctor-signal-checks | 03, 06, 07, 08 | 5 | `cli/doctor.ts`, `cli/__tests__/doctor.test.ts` |
+| 08-init-signal-onboarding | 03, 05, 06 | 4 | `cli/setup.ts`, `cli/keychain.ts`, `cli/__tests__/setup.test.ts` |
+| 09-doctor-signal-checks | 03, 06, 08 | 5 | `cli/doctor.ts`, `cli/__tests__/doctor.test.ts` |
 | 12-readme-and-pack | 01–11 | 6 | `README.md` |
 
 ### Seam defects found and repaired during the self-check
@@ -99,3 +98,12 @@ Two collisions would have put sessions on the same file:
 
 Task 09 also gained a dependency on 08, since it consumes the Keychain account
 constants (`SIGNAL_SERVICE`, `KRX_ID_ACCOUNT`, …) that 08 adds to `cli/keychain.ts`.
+
+3. **Tasks 06 and 07 were merged into one during wave 3** — the third instance of
+   the same shape, and the only one the type system settled outright. `JOB_KEYS`
+   types both `Config.jobs` (`Record<JobName, boolean>`) and `JOBS`
+   (`Record<JobKey, JobSpec>`), so widening it in `config.ts` broke `launchd.ts`
+   and four test files *in the same compile*. Task 06's Verify (`npm test` green)
+   could not pass while `launchd.ts` was out of its scope. One `Record<>`
+   contract cannot be split across two tasks; `tasks/06-config-and-launchd.md`
+   now owns both, and the old `07-launchd-signal-jobs.md` is deleted.

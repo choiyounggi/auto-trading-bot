@@ -299,6 +299,14 @@ def test_pyproject_leaves_everything_else_untouched() -> None:
         "python-dotenv>=1.0",
         "jsonschema>=4.21",
         "holidays>=0.50",
+        # 태스크 02: 신호 코드가 import 하는 6개. 이 단언은 스냅샷이라
+        # 정당한 의존성 추가에도 깨지므로, 추가할 때 함께 갱신한다.
+        "pykrx>=1.0.45",
+        "pandas>=2.0",
+        "numpy>=1.24",
+        "beautifulsoup4>=4.12",
+        "lxml>=5.0",
+        "yfinance>=0.2",
     ]
     assert data["project"]["optional-dependencies"]["dev"] == [
         "pytest>=8.0",

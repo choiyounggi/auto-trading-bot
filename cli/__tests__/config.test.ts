@@ -6,12 +6,27 @@ import { join } from "node:path";
 
 import {
   JOB_KEYS,
+  NEWS_BACKENDS,
   configHome,
+  defaultSignalDir,
   parseConfig,
   loadConfig,
   saveConfig,
   type Config,
 } from "../config.js";
+
+/** The seven jobs, all enabled — the shape `parseConfig` defaults to. */
+function allJobs(): Record<string, boolean> {
+  return {
+    orchestrator: true,
+    monitor: true,
+    reconciler: true,
+    dipBuy: true,
+    usOrchestrator: true,
+    signalKr: true,
+    signalUs: true,
+  };
+}
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "kis-cfg-"));
@@ -53,13 +68,25 @@ test("omitting llmAgent and jobs applies the documented defaults", () => {
   assert.equal(r.ok, true);
   if (!r.ok) return;
   assert.equal(r.value.llmAgent, "claude");
-  assert.deepEqual(r.value.jobs, {
-    orchestrator: true,
-    monitor: true,
-    reconciler: true,
-    dipBuy: true,
-    usOrchestrator: true,
-  });
+  assert.deepEqual(r.value.jobs, allJobs());
+});
+
+test("omitting newsLlmBackend defaults to none — enrichment costs nothing by default", () => {
+  const r = parseConfig(validRaw());
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.value.newsLlmBackend, "none");
+});
+
+test("an explicit newsLlmBackend parses through unchanged", () => {
+  const r = parseConfig({ ...validRaw(), newsLlmBackend: "codex" });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.value.newsLlmBackend, "codex");
+});
+
+test("defaultSignalDir points at the package's own data/signals", () => {
+  assert.equal(defaultSignalDir("/opt/kis"), "/opt/kis/data/signals");
 });
 
 test("configHome honours an absolute KIS_TRADER_HOME", () => {
@@ -91,13 +118,34 @@ test("an invalid llmAgent reports the exact allowed-values message", () => {
   );
 });
 
+test("an invalid newsLlmBackend reports exactly the allowed-values message", () => {
+  // `gemini` is the trap: it is a valid `llmAgent` but the signal bot's
+  // NEWS_LLM_BACKEND does not support it. deepEqual so a spurious second error
+  // (e.g. the key also being treated as required) fails the test too.
+  assert.deepEqual(errorsOf({ ...validRaw(), newsLlmBackend: "gemini" }), [
+    "newsLlmBackend must be one of none, claude, codex, pi",
+  ]);
+});
+
+test("a non-string newsLlmBackend is rejected with the same message", () => {
+  assert.deepEqual(errorsOf({ ...validRaw(), newsLlmBackend: 3 }), [
+    "newsLlmBackend must be one of none, claude, codex, pi",
+  ]);
+});
+
 test("a non-boolean job value is rejected by name", () => {
   const errs = errorsOf({ ...validRaw(), jobs: { monitor: "yes" } });
   assert.ok(errs.includes("jobs.monitor must be a boolean"), errs.join("; "));
-  // The key added last is the one most likely to miss the JOB_KEYS-driven loop,
-  // so it is asserted exactly: one error, named, and nothing else.
+  // The keys added last are the ones most likely to miss the JOB_KEYS-driven
+  // loop, so they are asserted exactly: one error, named, and nothing else.
   assert.deepEqual(errorsOf({ ...validRaw(), jobs: { usOrchestrator: "yes" } }), [
     "jobs.usOrchestrator must be a boolean",
+  ]);
+  assert.deepEqual(errorsOf({ ...validRaw(), jobs: { signalKr: "yes" } }), [
+    "jobs.signalKr must be a boolean",
+  ]);
+  assert.deepEqual(errorsOf({ ...validRaw(), jobs: { signalUs: 1 } }), [
+    "jobs.signalUs must be a boolean",
   ]);
 });
 
@@ -182,12 +230,15 @@ test("saveConfig writes mode 0600 and round-trips through loadConfig", () => {
       pythonPath: "/usr/bin/python3.11",
       signalDir: "/opt/signals",
       llmAgent: "pi",
+      newsLlmBackend: "claude",
       jobs: {
         orchestrator: true,
         monitor: false,
         reconciler: true,
         dipBuy: false,
         usOrchestrator: false,
+        signalKr: true,
+        signalUs: false,
       },
     };
     const p = saveConfig(cfg, dir);
@@ -198,6 +249,9 @@ test("saveConfig writes mode 0600 and round-trips through loadConfig", () => {
     assert.equal(back.ok, true);
     if (!back.ok) return;
     assert.deepEqual(back.value, cfg);
+    // Called out separately: a key that is optional in the parser is exactly the
+    // kind that survives a round-trip as its default instead of its saved value.
+    assert.equal(back.value.newsLlmBackend, "claude");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -230,35 +284,102 @@ test("partially specified jobs default the unlisted keys to true", () => {
   assert.equal(r.value.jobs.reconciler, true);
   assert.equal(r.value.jobs.dipBuy, true);
   assert.equal(r.value.jobs.usOrchestrator, true);
+  assert.equal(r.value.jobs.signalKr, true);
+  assert.equal(r.value.jobs.signalUs, true);
 
-  // Same rule from the other side: opting the new key out must not disturb the
-  // four that were already there.
+  // Same rule from the other side: opting one key out must not disturb the
+  // others that were already there.
   const off = parseConfig({ ...validRaw(), jobs: { usOrchestrator: false } });
   assert.equal(off.ok, true);
   if (!off.ok) return;
-  assert.deepEqual(off.value.jobs, {
-    orchestrator: true,
-    monitor: true,
-    reconciler: true,
-    dipBuy: true,
-    usOrchestrator: false,
+  assert.deepEqual(off.value.jobs, { ...allJobs(), usOrchestrator: false });
+
+  const noSignals = parseConfig({
+    ...validRaw(),
+    jobs: { signalKr: false, signalUs: false },
+  });
+  assert.equal(noSignals.ok, true);
+  if (!noSignals.ok) return;
+  assert.deepEqual(noSignals.value.jobs, {
+    ...allJobs(),
+    signalKr: false,
+    signalUs: false,
   });
 });
 
-test("JOB_KEYS is the whole five-job inventory, in declared order", () => {
-  assert.equal(JOB_KEYS.length, 5, `JOB_KEYS drifted: ${JOB_KEYS.join(", ")}`);
-  assert.ok(JOB_KEYS.includes("usOrchestrator"), JOB_KEYS.join(", "));
+test("omitting jobs enables all seven, including both signal jobs", () => {
+  const r = parseConfig(validRaw());
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.deepEqual(r.value.jobs, allJobs());
+  assert.equal(Object.keys(r.value.jobs).length, 7);
+});
+
+test("JOB_KEYS is the whole seven-job inventory, in declared order", () => {
+  assert.equal(JOB_KEYS.length, 7, `JOB_KEYS drifted: ${JOB_KEYS.join(", ")}`);
+  // The two names are a contract with the launchd job table — renaming either
+  // one here silently unpairs a job from its schedule.
+  assert.ok(JOB_KEYS.includes("signalKr"), JOB_KEYS.join(", "));
+  assert.ok(JOB_KEYS.includes("signalUs"), JOB_KEYS.join(", "));
   assert.deepEqual([...JOB_KEYS], [
     "orchestrator",
     "monitor",
     "reconciler",
     "dipBuy",
     "usOrchestrator",
+    "signalKr",
+    "signalUs",
   ]);
   // Every key the parser defaults must come from JOB_KEYS and vice versa —
-  // a key present in one but not the other is the 4-vs-5 defect this guards.
+  // a key present in one but not the other is the 5-vs-7 defect this guards.
   const r = parseConfig(validRaw());
   assert.equal(r.ok, true);
   if (!r.ok) return;
   assert.deepEqual(Object.keys(r.value.jobs).sort(), [...JOB_KEYS].sort());
+});
+
+test("NEWS_BACKENDS is its own four-value list, not a copy of AGENTS", () => {
+  assert.equal(NEWS_BACKENDS.length, 4, `NEWS_BACKENDS drifted: ${NEWS_BACKENDS.join(", ")}`);
+  // `none` present: not calling an LLM is a supported choice, and the default.
+  assert.ok(NEWS_BACKENDS.includes("none"), NEWS_BACKENDS.join(", "));
+  // `gemini` absent: the signal bot's NEWS_LLM_BACKEND has no gemini path, so
+  // letting it in would validate a value that fails at run time.
+  assert.equal(
+    (NEWS_BACKENDS as readonly string[]).includes("gemini"),
+    false,
+    NEWS_BACKENDS.join(", "),
+  );
+  assert.deepEqual([...NEWS_BACKENDS], ["none", "claude", "codex", "pi"]);
+});
+
+test("newsLlmBackend is independent of llmAgent", () => {
+  // The trading agent being gemini must not select a news backend — they are
+  // different decisions, and deriving one from the other would both pick an
+  // unsupported value and start billing the trading agent for enrichment.
+  const r = parseConfig({ ...validRaw(), llmAgent: "gemini" });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.value.llmAgent, "gemini");
+  assert.equal(r.value.newsLlmBackend, "none");
+
+  // And the reverse: a news backend does not move llmAgent off its default.
+  const back = parseConfig({ ...validRaw(), newsLlmBackend: "pi" });
+  assert.equal(back.ok, true);
+  if (!back.ok) return;
+  assert.equal(back.value.llmAgent, "claude");
+  assert.equal(back.value.newsLlmBackend, "pi");
+});
+
+test("signalDir stays required — defaultSignalDir is a suggestion, not a default", () => {
+  const raw = validRaw();
+  delete raw.signalDir;
+  const r = parseConfig(raw);
+  assert.equal(r.ok, false, "signalDir must not acquire a parser default");
+  if (r.ok) return;
+  assert.deepEqual(r.errors, ["signalDir is required"]);
+});
+
+test("defaultSignalDir joins onto any project dir without assuming a trailing slash", () => {
+  assert.equal(defaultSignalDir("/opt/kis/"), "/opt/kis/data/signals");
+  assert.equal(defaultSignalDir("/"), "/data/signals");
 });

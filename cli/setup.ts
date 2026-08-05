@@ -1,5 +1,5 @@
 /**
- * `kis-trader init` — the seven-step onboarding flow.
+ * `kis-trader init` — the eight-step onboarding flow.
  *
  * This module only sequences and reports; every effect (keychain write, config
  * write, venv build, launchd load) belongs to a module that already owns it and
@@ -10,8 +10,9 @@
  *
  * Two rules shape the ordering:
  *
- * - **Secrets never touch `config.json`.** The KIS key/secret/account and the
- *   Telegram token/chat id go to the login keychain and nowhere else; nothing
+ * - **Secrets never touch `config.json`.** The KIS key/secret/account, the
+ *   Telegram token/chat id, and the KRX login and Brave API key collected for
+ *   the signal pipeline go to the login keychain and nowhere else; nothing
  *   captured by a secret prompt is ever written back to the screen, because a
  *   printed credential is a leaked credential the moment the terminal is
  *   scrolled, recorded, or piped into a log.
@@ -27,21 +28,27 @@
  */
 
 import { statSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 
 import {
   AGENTS,
   JOB_KEYS,
   MODES,
+  NEWS_BACKENDS,
+  defaultSignalDir,
   parseConfig,
   saveConfig as saveConfigReal,
   type Agent,
   type Config,
   type Mode,
+  type NewsBackend,
 } from "./config.js";
 import {
+  BRAVE_KEY_ACCOUNT,
   KIS_SERVICE,
+  KRX_ID_ACCOUNT,
+  KRX_PW_ACCOUNT,
+  SIGNAL_SERVICE,
   TELEGRAM_CHATID_ACCOUNT,
   TELEGRAM_SERVICE,
   TELEGRAM_TOKEN_ACCOUNT,
@@ -75,7 +82,7 @@ import {
   type Io,
 } from "./prompt.js";
 
-const TOTAL_STEPS = 7;
+const TOTAL_STEPS = 8;
 
 /** Matches `prompt.ts`, so a re-prompting loop here behaves like one there. */
 const MAX_PROMPT_ATTEMPTS = 3;
@@ -136,9 +143,12 @@ function pad2(n: number): string {
 /** Human-readable form of a job's schedule, for the install question. */
 function scheduleSummary(job: JobKey): string {
   const schedule = JOBS[job].schedule;
-  return "intervalSec" in schedule
-    ? `every ${schedule.intervalSec}s`
-    : `daily ${pad2(schedule.hour)}:${pad2(schedule.minute)}`;
+  if ("intervalSec" in schedule) return `every ${schedule.intervalSec}s`;
+  // A job may run at several fixed times per weekday (`signalUs`: 22:35 and
+  // 23:35). Listing every one matters here — this string is what the user reads
+  // before agreeing to install the job.
+  const times = "times" in schedule ? schedule.times : [schedule];
+  return `daily ${times.map((t) => `${pad2(t.hour)}:${pad2(t.minute)}`).join(", ")}`;
 }
 
 /**
@@ -208,7 +218,7 @@ async function askDefaultValidated(
 }
 
 /**
- * Walk the seven onboarding steps.
+ * Walk the eight onboarding steps.
  *
  * Returns a process exit code: 0 when setup completed, 1 when the user aborted
  * or a step failed.
@@ -223,7 +233,7 @@ export async function runInit(opts: {
   const deps: InitDeps = { ...defaultDeps, ...opts.deps };
   const { line, section, ok, warn, fail } = writers(io.output);
 
-  // ── 1/7 ─ trading mode ──────────────────────────────────────────────
+  // ── 1/8 ─ trading mode ──────────────────────────────────────────────
   section(1, "Trading mode");
   const mode = await choose<Mode>("Trading mode", MODES, "paper", io);
   if (mode === "real") {
@@ -241,7 +251,7 @@ export async function runInit(opts: {
   }
   ok(`mode: ${mode}`);
 
-  // ── 2/7 ─ KIS credentials ───────────────────────────────────────────
+  // ── 2/8 ─ KIS credentials ───────────────────────────────────────────
   section(2, "KIS credentials");
   const appKey = await promptSecret("KIS app key: ", io);
   const appSecret = await promptSecret("KIS app secret: ", io);
@@ -261,7 +271,7 @@ export async function runInit(opts: {
   }
   ok(`KIS credentials stored in the login keychain (${mode})`);
 
-  // ── 3/7 ─ Telegram ──────────────────────────────────────────────────
+  // ── 3/8 ─ Telegram ──────────────────────────────────────────────────
   section(3, "Telegram");
   let telegram: KeychainItem[] = [];
   if (await yesNo("Configure Telegram notifications?", true, io)) {
@@ -298,7 +308,7 @@ export async function runInit(opts: {
     ok("Telegram credentials stored in the login keychain");
   }
 
-  // ── 4/7 ─ LLM CLI ───────────────────────────────────────────────────
+  // ── 4/8 ─ LLM CLI ───────────────────────────────────────────────────
   section(4, "LLM CLI");
   const detected = deps.detectAgents();
   const found: Agent[] = [];
@@ -317,7 +327,7 @@ export async function runInit(opts: {
   }
   const llmAgent = await choose<Agent>("Default agent", found, found[0], io);
 
-  // ── 5/7 ─ Python + signal directory ─────────────────────────────────
+  // ── 5/8 ─ Python + signal directory ─────────────────────────────────
   section(5, "Python + signal directory");
   const pythonPath = deps.findPython();
   if (pythonPath === null) {
@@ -327,28 +337,87 @@ export async function runInit(opts: {
   }
   ok(`python: ${pythonPath}`);
   const signalDir = await askDefaultValidated(
-    "Signal directory (stock-signal-bot output)",
-    join(homedir(), "stock-signal-bot", "data", "signals"),
+    "Signal directory (signal pipeline output)",
+    defaultSignalDir(opts.projectDir),
     validators.absolutePath,
     io,
   );
   if (deps.dirExists(signalDir)) {
     ok(`signals: ${signalDir}`);
   } else {
-    // The signal producer lives in another repo that may not be installed yet.
-    // Blocking here would make `init` impossible to finish for a user who
-    // intends to set that up second, so this warns and moves on.
+    // Now the normal case on a fresh install: the producer lives in this package
+    // and creates the directory on its first run. Blocking here would make
+    // `init` impossible to finish before that run, so this warns and moves on.
     warn(`${signalDir} does not exist yet — no signals will be read until it does.`);
   }
 
-  // ── 6/7 ─ bootstrap ─────────────────────────────────────────────────
-  section(6, "Bootstrap");
+  // ── 6/8 ─ signal pipeline ───────────────────────────────────────────
+  //
+  // Both credentials are optional (the pipeline falls back to public data and
+  // to no news enrichment), so "no" is a real path that writes nothing at all —
+  // an empty keychain item would read back as *configured* on the Python side
+  // and fail later as an authentication error instead of a missing credential.
+  section(6, "신호 파이프라인");
+  const signalItems: KeychainItem[] = [];
+  if (await yesNo("KRX 로그인을 설정할까요? (수급 데이터 정확도가 올라갑니다)", true, io)) {
+    try {
+      const krxId = await askValidated("KRX ID: ", validators.nonEmpty, io);
+      const krxPw = await promptSecretValidated("KRX 비밀번호: ", validators.nonEmpty, io);
+      // Pushed only once *both* halves are in hand: an id stored without its
+      // password is a login the engine cannot use, and it looks configured.
+      signalItems.push(
+        [SIGNAL_SERVICE, KRX_ID_ACCOUNT, krxId],
+        [SIGNAL_SERVICE, KRX_PW_ACCOUNT, krxPw],
+      );
+    } catch {
+      // Optional by design, so an unusable value degrades to exactly the state
+      // answering "no" produces. Nothing has been written yet.
+      warn("KRX 값을 읽지 못했습니다 — 공개 데이터만 사용합니다.");
+    }
+  } else {
+    ok("KRX: 건너뜀 — 공개 데이터만 사용합니다");
+  }
+  // Defaults to no: this one costs the user an API signup, and the pipeline
+  // works without it.
+  if (await yesNo("Brave Search API 키를 설정할까요? (뉴스 보강용, 선택)", false, io)) {
+    try {
+      const braveKey = await promptSecretValidated(
+        "Brave Search API key: ",
+        validators.nonEmpty,
+        io,
+      );
+      signalItems.push([SIGNAL_SERVICE, BRAVE_KEY_ACCOUNT, braveKey]);
+    } catch {
+      warn("Brave Search 키를 읽지 못했습니다 — 뉴스 보강 없이 진행합니다.");
+    }
+  } else {
+    ok("Brave Search: 건너뜀 — 뉴스 보강 없이 동작합니다");
+  }
+  if (signalItems.length > 0) {
+    const problem = store(deps, signalItems);
+    if (problem !== null) {
+      fail(problem);
+      return 1;
+    }
+    ok("신호 자격증명을 로그인 키체인에 저장했습니다");
+  }
+  const newsLlmBackend = await choose<NewsBackend>(
+    "뉴스 분류 LLM",
+    NEWS_BACKENDS,
+    "none",
+    io,
+  );
+  ok(`뉴스 분류 LLM: ${newsLlmBackend}`);
+
+  // ── 7/8 ─ bootstrap ─────────────────────────────────────────────────
+  section(7, "Bootstrap");
   const parsed = parseConfig({
     mode,
     projectDir: opts.projectDir,
     pythonPath,
     signalDir,
     llmAgent,
+    newsLlmBackend,
   });
   if (!parsed.ok) {
     fail("config is invalid — nothing was saved:");
@@ -366,8 +435,8 @@ export async function runInit(opts: {
   // launchd jobs from being installed against a venv that does not work.
   if (steps.some((step) => !step.ok)) return 1;
 
-  // ── 7/7 ─ launchd ───────────────────────────────────────────────────
-  section(7, "launchd jobs");
+  // ── 8/8 ─ launchd ───────────────────────────────────────────────────
+  section(8, "launchd jobs");
   for (const job of JOB_KEYS) {
     const wanted = await yesNo(`Install ${job} (${scheduleSummary(job)})?`, true, io);
     cfg.jobs[job] = wanted;
