@@ -8,19 +8,27 @@
  * wrong everywhere else.
  *
  * A launchd job gets a minimal environment and loads no rc files, so nothing
- * here may rely on the user's shell: the interpreter is `cfg.pythonPath`, an
- * absolute path a version-manager shim cannot shadow, and every variable the
+ * here may rely on the user's shell: the interpreter is `venvPython(stateDir)`,
+ * an absolute path a version-manager shim cannot shadow, and every variable the
  * engine needs (`PATH`, `HOME`, `KIS_TRADER_HOME`, `KIS_MODE`,
  * `KIS_TRADER_SIGNAL_DIR`) is declared inside the plist. Both jobs' streams get
  * an explicit log file — a service without a log sink fails silently.
+ *
+ * The interpreter is the **venv's**, not the bare `cfg.pythonPath`. Measured:
+ * the configured interpreter has no pydantic, sqlalchemy or pandas, so a job
+ * pointed at it dies with an ImportError on its first scheduled run — into a
+ * log nobody is watching. `cfg.pythonPath` still builds the venv and still
+ * seeds `PATH`; it just never runs a job.
  *
  * Installation is confirmed by *observation*: `launchctl bootstrap` exiting 0
  * means the request was accepted, not that the job is loaded, so `installJob`
  * only reports `loaded: true` when the label actually shows up in
  * `launchctl list`.
  *
- * No job carries `KeepAlive`. These are one-shot runs on a schedule; KeepAlive
- * would make launchd restart them the moment they finish.
+ * Only `telegramAgent` carries `KeepAlive`: it is a long-lived daemon, and a
+ * supervisor restart is the supported way to recover one. Every other job is a
+ * one-shot run on a schedule, where KeepAlive would make launchd restart it the
+ * moment it finished.
  */
 
 import { execFileSync } from "node:child_process";
@@ -34,6 +42,7 @@ import {
 import { homedir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 
+import { venvPython } from "./bootstrap.js";
 import { JOB_KEYS, type Config, type JobName } from "./config.js";
 
 /** The job inventory lives in `config.ts`; this is the same union, re-exported. */
@@ -62,6 +71,15 @@ const STALE_LOCK_MINUTES = 15;
 /** PATH entries appended after the interpreter's own directory. */
 const BASE_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 
+/**
+ * Seconds launchd waits before restarting a `keepAlive` job.
+ *
+ * Copied from the hand-installed telegram agent plist this job adopts. It is
+ * also launchd's own default, but stating it keeps a crash-looping daemon's
+ * backoff visible in the file rather than implied.
+ */
+const THROTTLE_SECONDS = 30;
+
 export interface JobSpec {
   /** Arguments after the interpreter — always a `-m module` invocation. */
   args: string[];
@@ -69,7 +87,13 @@ export interface JobSpec {
     | { hour: number; minute: number }
     /** Several fixed times on each weekday — `signalUs` runs at 22:35 and 23:35. */
     | { times: { hour: number; minute: number }[] }
-    | { intervalSec: number };
+    | { intervalSec: number }
+    /**
+     * A long-lived daemon: started at load and restarted by launchd whenever it
+     * exits. Carries no schedule at all — a scheduled start on top of KeepAlive
+     * would have launchd run a second copy alongside the one already up.
+     */
+    | { keepAlive: true };
   /** Basename of the stdout log; stderr gets the `.err.log` sibling. */
   log: string;
   /**
@@ -85,7 +109,7 @@ export interface JobSpec {
 }
 
 /**
- * The seven jobs, with the schedules the previously hand-installed plists ran on.
+ * The eight jobs, with the schedules the previously hand-installed plists ran on.
  * Keyed by `JobName`, so a job added to `config.ts` without a schedule here is a
  * type error rather than a job that silently never installs.
  *
@@ -133,6 +157,16 @@ export const JOBS: Record<JobKey, JobSpec> = {
     log: "signalUs.log",
     guarded: true,
   },
+  // Adopted from a plist installed by hand: the same module, `RunAtLoad`,
+  // `KeepAlive` and a 30s throttle. Deliberately **not** guarded — the guard
+  // skips a run whose predecessor still holds the lock, and a daemon that never
+  // exits holds it forever, so every restart after the first would exit 0 as if
+  // it had been skipped and the agent would never come back up.
+  telegramAgent: {
+    args: ["-m", "src.agent.telegram_agent"],
+    schedule: { keepAlive: true },
+    log: "telegramAgent.log",
+  },
 };
 
 /** Where a guarded job's lock directory lives. */
@@ -163,7 +197,7 @@ export function lockPath(job: JobKey, home: string): string {
  */
 export function guardScript(job: JobKey, cfg: Config, home: string): string {
   const lock = lockPath(job, home);
-  const cmd = [cfg.pythonPath, ...JOBS[job].args].map(shq).join(" ");
+  const cmd = [venvPython(cfg.stateDir), ...JOBS[job].args].map(shq).join(" ");
   return (
     `L=${shq(lock)}; ` +
     `if ! mkdir "$L" 2>/dev/null; then ` +
@@ -222,6 +256,15 @@ function pathValue(pythonPath: string): string {
 
 function scheduleXml(job: JobKey): string {
   const schedule = JOBS[job].schedule;
+  // A supervised daemon: launchd starts it at load and restarts it on exit, so
+  // it gets no StartCalendarInterval and no StartInterval at all.
+  if ("keepAlive" in schedule) {
+    return (
+      "  <key>RunAtLoad</key>\n  <true/>\n" +
+      "  <key>KeepAlive</key>\n  <true/>\n" +
+      `  <key>ThrottleInterval</key>\n  <integer>${THROTTLE_SECONDS}</integer>\n`
+    );
+  }
   if ("intervalSec" in schedule) {
     return `  <key>StartInterval</key>\n  <integer>${schedule.intervalSec}</integer>\n`;
   }
@@ -254,9 +297,11 @@ export function renderPlist(
   username?: string,
 ): string {
   const label = labelFor(job, username);
+  // The venv interpreter, not `cfg.pythonPath`: the bare one has none of the
+  // engine's dependencies (measured — no pydantic, sqlalchemy or pandas).
   const argv = JOBS[job].guarded
     ? ["/bin/sh", "-c", guardScript(job, cfg, home)]
-    : [cfg.pythonPath, ...JOBS[job].args];
+    : [venvPython(cfg.stateDir), ...JOBS[job].args];
   const program = argv
     .map((arg) => `    <string>${esc(arg)}</string>\n`)
     .join("");

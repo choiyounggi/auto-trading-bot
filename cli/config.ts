@@ -38,29 +38,48 @@ export const JOB_KEYS = [
   "usOrchestrator",
   "signalKr",
   "signalUs",
+  "telegramAgent",
 ] as const;
 export type JobName = (typeof JOB_KEYS)[number];
 
 /** Keys the user must supply. No defaults — see the module docstring. */
-export const REQUIRED = ["mode", "projectDir", "pythonPath", "signalDir"] as const;
+export const REQUIRED = [
+  "mode",
+  "projectDir",
+  "stateDir",
+  "pythonPath",
+  "signalDir",
+] as const;
 
 /** Absolute-path keys, checked after the required-presence pass. */
-const PATH_KEYS = ["projectDir", "pythonPath", "signalDir"] as const;
+const PATH_KEYS = ["projectDir", "stateDir", "pythonPath", "signalDir"] as const;
 
 /**
  * Where the bundled signal producer writes and the trader reads.
+ *
+ * The argument is the **state** root, not the package root: `npm i -g` replaces
+ * the installed package directory wholesale, so signals written inside it are
+ * destroyed by the next upgrade.
  *
  * This is only the value `init` suggests at the prompt — `signalDir` stays a
  * required key with no parser default, so a config that omits it still fails
  * loudly instead of silently pointing at a directory nobody chose.
  */
-export function defaultSignalDir(projectDir: string): string {
-  return join(projectDir, "data", "signals");
+export function defaultSignalDir(stateDir: string): string {
+  return join(stateDir, "data", "signals");
 }
 
 export interface Config {
   mode: Mode;
+  /** Where the code lives. Replaced wholesale by an upgrade — read-only at run time. */
   projectDir: string;
+  /**
+   * Where runtime state lives: the venv, the trade database, logs and signals.
+   *
+   * Separate from `projectDir` precisely because an upgrade replaces that
+   * directory; anything the engine must keep across upgrades hangs off here.
+   */
+  stateDir: string;
   pythonPath: string;
   signalDir: string;
   llmAgent: Agent;
@@ -165,6 +184,7 @@ export function parseConfig(input: unknown): ParseResult {
     usOrchestrator: true,
     signalKr: true,
     signalUs: true,
+    telegramAgent: true,
   };
   if (input.jobs !== undefined) {
     if (!isPlainObject(input.jobs)) {
@@ -189,6 +209,7 @@ export function parseConfig(input: unknown): ParseResult {
     value: {
       mode: input.mode as Mode,
       projectDir: input.projectDir as string,
+      stateDir: input.stateDir as string,
       pythonPath: input.pythonPath as string,
       signalDir: input.signalDir as string,
       llmAgent,
