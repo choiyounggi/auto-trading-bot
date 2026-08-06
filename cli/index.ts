@@ -150,12 +150,15 @@ function cmdStart(rest: string[]): number {
 
   // spawnSync, not spawn: `stdio: "inherit"` streams identically either way,
   // and the synchronous form is what lets the child's exit code become ours.
-  const child = spawnSync(venvPython(cfg.projectDir), JOBS[job].args, {
+  // The interpreter lives under the state root — the venv there is what an
+  // upgrade of `projectDir` cannot destroy; the code it runs still ships in
+  // `projectDir`, which stays the working directory.
+  const child = spawnSync(venvPython(cfg.stateDir), JOBS[job].args, {
     stdio: "inherit",
     cwd: cfg.projectDir,
   });
   if (child.error !== undefined) {
-    err.write(`could not run ${venvPython(cfg.projectDir)}: ${child.error.message}\n`);
+    err.write(`could not run ${venvPython(cfg.stateDir)}: ${child.error.message}\n`);
     return 1;
   }
   return child.status ?? 1;

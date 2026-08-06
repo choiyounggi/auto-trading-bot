@@ -37,6 +37,7 @@ import type { Io } from "../prompt.js";
 
 const HOME = "/Users/tester/.kis-trader";
 const PROJECT = "/Users/tester/auto-trading-bot";
+const STATE = "/Users/tester/state";
 
 /** Distinctive so an accidental echo is unmistakable in the captured output. */
 const KIS_KEY = "KISAPPKEYVALUE0001";
@@ -176,6 +177,8 @@ const HAPPY: readonly string[] = [
   TG_TOKEN,
   TG_CHAT,
   "claude",
+  // Empty: accept the offered stateDir default (the state home).
+  "",
   SIGNAL_DIR,
   ...SIGNAL_ACCEPT,
   ...YES_PER_JOB,
@@ -235,6 +238,7 @@ test("declining Telegram still succeeds and writes only the three KIS items", as
     KIS_ACCT,
     "n",
     "claude",
+    "",
     SIGNAL_DIR,
     ...SIGNAL_SKIP,
     ...YES_PER_JOB,
@@ -312,6 +316,7 @@ test("confirming real mode scopes the keychain accounts to real", async () => {
     KIS_ACCT,
     "n",
     "claude",
+    "",
     SIGNAL_DIR,
     ...SIGNAL_SKIP,
     ...YES_PER_JOB,
@@ -341,6 +346,7 @@ test("job answers are recorded into the config and only accepted jobs install", 
     KIS_ACCT,
     "n",
     "claude",
+    "",
     SIGNAL_DIR,
     ...SIGNAL_SKIP,
     ...JOB_KEYS.map((_, i) => (i % 2 === 0 ? "y" : "n")),
@@ -452,7 +458,7 @@ test("no usable Python aborts with the exact remediation line", async () => {
 test("an invalid config is reported and never saved", async () => {
   const { deps, rec } = stubDeps();
   const { code, h } = await run(
-    ["paper", KIS_KEY, KIS_SECRET, KIS_ACCT, "n", "claude", SIGNAL_DIR, ...SIGNAL_SKIP],
+    ["paper", KIS_KEY, KIS_SECRET, KIS_ACCT, "n", "claude", "", SIGNAL_DIR, ...SIGNAL_SKIP],
     deps,
     "relative/project/dir",
   );
@@ -505,7 +511,7 @@ test("a failed bootstrap step stops before any launchd job is installed", async 
     },
   });
   const { code, h } = await run(
-    ["paper", KIS_KEY, KIS_SECRET, KIS_ACCT, "n", "claude", SIGNAL_DIR, ...SIGNAL_SKIP],
+    ["paper", KIS_KEY, KIS_SECRET, KIS_ACCT, "n", "claude", "", SIGNAL_DIR, ...SIGNAL_SKIP],
     deps,
   );
 
@@ -527,6 +533,7 @@ test("an unreadable Telegram token degrades to skipped instead of failing", asyn
     "still-not",
     "nope-either",
     "claude",
+    "",
     SIGNAL_DIR,
     ...SIGNAL_SKIP,
     ...YES_PER_JOB,
@@ -550,6 +557,7 @@ test("an out-of-range choice falls back instead of blocking the run", async () =
     KIS_ACCT,
     "n",
     "claude",
+    "",
     SIGNAL_DIR,
     ...SIGNAL_SKIP,
     ...YES_PER_JOB,
@@ -611,6 +619,7 @@ test("declining both KRX and Brave writes nothing and keeps the backend at none"
     TG_TOKEN,
     TG_CHAT,
     "claude",
+    "",
     SIGNAL_DIR,
     ...SIGNAL_SKIP,
     ...YES_PER_JOB,
@@ -628,7 +637,7 @@ test("declining both KRX and Brave writes nothing and keeps the backend at none"
   assert.equal(rec.saved[0].newsLlmBackend, "none");
 });
 
-test("the signal directory prompt defaults to the package's own data/signals", async () => {
+test("the signal directory prompt defaults to data/signals under the state dir", async () => {
   const { deps, rec } = stubDeps();
   const answers = [
     "paper",
@@ -637,7 +646,8 @@ test("the signal directory prompt defaults to the package's own data/signals", a
     KIS_ACCT,
     "n",
     "claude",
-    // Empty: take whatever the prompt offered.
+    // Empty twice: take the offered stateDir, then the signalDir derived from it.
+    "",
     "",
     ...SIGNAL_SKIP,
     ...YES_PER_JOB,
@@ -646,13 +656,99 @@ test("the signal directory prompt defaults to the package's own data/signals", a
 
   assert.equal(code, 0);
   assert.equal(h.unused(), 0);
-  const expected = defaultSignalDir(PROJECT);
-  assert.equal(expected, join(PROJECT, "data", "signals"));
+  const expected = defaultSignalDir(HOME);
+  assert.equal(expected, join(HOME, "data", "signals"));
   assert.ok(
     h.out().includes(`[${expected}]`),
-    "the offered default must be the bundled producer's own output directory",
+    "the offered default must live under the state dir an upgrade cannot destroy",
   );
   assert.equal(rec.saved[0].signalDir, expected);
+});
+
+// ── state directory (step 5/8) ─────────────────────────────────────────
+
+test("the stateDir prompt defaults to the state home and lands in the config", async () => {
+  const { deps, rec } = stubDeps();
+  const { code, h } = await run(HAPPY, deps);
+
+  assert.equal(code, 0);
+  assert.ok(
+    h.out().includes(`State directory`),
+    "the state directory must be asked for, never guessed",
+  );
+  assert.ok(
+    h.out().includes(`[${HOME}]`),
+    "the offered default must be the state home (configHome() at the call site)",
+  );
+  assert.equal(rec.saved[0].stateDir, HOME);
+});
+
+test("an answered stateDir is saved and drives the signalDir suggestion", async () => {
+  const { deps, rec } = stubDeps();
+  const answers = [
+    "paper",
+    KIS_KEY,
+    KIS_SECRET,
+    KIS_ACCT,
+    "n",
+    "claude",
+    STATE,
+    // Empty: take the signalDir suggestion, which must follow the answer above.
+    "",
+    ...SIGNAL_SKIP,
+    ...YES_PER_JOB,
+  ];
+  const { code, h } = await run(answers, deps);
+
+  assert.equal(code, 0);
+  assert.equal(h.unused(), 0);
+  assert.equal(rec.saved[0].stateDir, STATE);
+  assert.equal(rec.saved[0].signalDir, join(STATE, "data", "signals"));
+  assert.ok(
+    h.out().includes(`[${join(STATE, "data", "signals")}]`),
+    "the signal-dir suggestion must be derived from the answered stateDir",
+  );
+});
+
+test("a relative stateDir is re-prompted and the default wins after three attempts", async () => {
+  const { deps, rec } = stubDeps();
+  const answers = [
+    "paper",
+    KIS_KEY,
+    KIS_SECRET,
+    KIS_ACCT,
+    "n",
+    "claude",
+    "relative/state",
+    "still/relative",
+    "nope",
+    SIGNAL_DIR,
+    ...SIGNAL_SKIP,
+    ...YES_PER_JOB,
+  ];
+  const { code, h } = await run(answers, deps);
+
+  assert.equal(code, 0);
+  assert.equal(h.unused(), 0);
+  assert.ok(h.out().includes("Enter an absolute path starting with /."));
+  assert.equal(
+    rec.saved[0].stateDir,
+    HOME,
+    "the known-good default must win over an unusable answer",
+  );
+});
+
+test("telegramAgent is offered as always on by the job loop and lands in cfg.jobs", async () => {
+  const { deps, rec } = stubDeps();
+  const { code, h } = await run(HAPPY, deps);
+
+  assert.equal(code, 0);
+  assert.ok(
+    h.out().includes("Install telegramAgent (always on)?"),
+    "a keepAlive job must be described as always on, not with a clock time",
+  );
+  assert.equal(rec.saved[1].jobs.telegramAgent, true);
+  assert.ok(rec.installed.includes("telegramAgent"));
 });
 
 test("the chosen news backend reaches the saved config", async () => {
@@ -672,6 +768,7 @@ test("an unlisted news backend falls back to none instead of blocking", async ()
     KIS_ACCT,
     "n",
     "claude",
+    "",
     SIGNAL_DIR,
     "n",
     "n",
@@ -697,6 +794,7 @@ test("a KRX login whose password is unreadable is skipped, not half-written", as
     KIS_ACCT,
     "n",
     "claude",
+    "",
     SIGNAL_DIR,
     "y",
     KRX_ID,
@@ -736,6 +834,7 @@ test("a locked keychain during the signal step aborts before the config is saved
       KIS_ACCT,
       "n",
       "claude",
+      "",
       SIGNAL_DIR,
       "y",
       KRX_ID,
