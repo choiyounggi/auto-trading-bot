@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -57,39 +57,58 @@ function writeFile(path: string, body = "x\n"): string {
 
 const PYTHON = "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11";
 
-function cfgFor(projectDir: string, pythonPath = PYTHON): Config {
+/**
+ * A config whose two roots are **different directories**.
+ *
+ * That split is the whole point of this module now: the code (and its
+ * migrations) live under `projectDir`, which `npm i -g` replaces wholesale,
+ * while the venv and the trade database live under `stateDir`, which it must
+ * not touch. A fixture that pointed both at one directory would pass even if
+ * the implementation confused them.
+ */
+function cfgFor(projectDir: string, stateDir: string, pythonPath = PYTHON): Config {
   return {
     mode: "paper",
     projectDir,
+    stateDir,
     pythonPath,
-    signalDir: join(projectDir, "data", "signals"),
+    signalDir: join(stateDir, "data", "signals"),
     llmAgent: "claude",
-  newsLlmBackend: "none",
+    newsLlmBackend: "none",
     jobs: {
       orchestrator: true,
       monitor: true,
       reconciler: true,
       dipBuy: true,
       usOrchestrator: true,
-    signalKr: true,
-    signalUs: true,
+      signalKr: true,
+      signalUs: true,
+      telegramAgent: true,
     },
   };
 }
 
+/** The two roots inside one scratch dir, as separate sibling directories. */
+function roots(dir: string): { projectDir: string; stateDir: string } {
+  return { projectDir: join(dir, "code"), stateDir: join(dir, "state") };
+}
+
 /**
  * Build a project fixture. `migrations` maps filename → SQL body; `null` means
- * the `data/migrations` directory is not created at all.
+ * the `data/migrations` directory is not created at all. Migrations always land
+ * under `projectDir` — they ship with the code, not with the state.
  */
 function project(dir: string, migrations: Record<string, string> | null): Config {
+  const { projectDir, stateDir } = roots(dir);
+  mkdirSync(projectDir, { recursive: true });
   if (migrations !== null) {
-    const migDir = join(dir, "data", "migrations");
+    const migDir = join(projectDir, "data", "migrations");
     mkdirSync(migDir, { recursive: true });
     for (const [name, body] of Object.entries(migrations)) {
       writeFile(join(migDir, name), body);
     }
   }
-  return cfgFor(dir);
+  return cfgFor(projectDir, stateDir);
 }
 
 interface Call {
@@ -129,13 +148,16 @@ function steps(results: StepResult[]): string[] {
 
 // ── venvPython ────────────────────────────────────────────────────────
 
-test("venvPython points at .venv/bin/python under the project directory", () => {
-  assert.equal(venvPython("/opt/bot"), "/opt/bot/.venv/bin/python");
+test("venvPython points at .venv/bin/python under the STATE directory", () => {
+  assert.equal(venvPython("/s"), "/s/.venv/bin/python");
+  // The argument is the state root, not the package root: a venv inside the
+  // installed package is deleted by the next `npm i -g` that replaces it.
+  assert.equal(venvPython("/var/lib/kis"), "/var/lib/kis/.venv/bin/python");
 });
 
 test("venvPython keeps the result absolute and normalises a trailing slash", () => {
-  assert.equal(venvPython("/opt/bot/"), "/opt/bot/.venv/bin/python");
-  assert.ok(venvPython("/opt/bot").startsWith("/"));
+  assert.equal(venvPython("/var/lib/kis/"), "/var/lib/kis/.venv/bin/python");
+  assert.ok(venvPython("/var/lib/kis").startsWith("/"));
 });
 
 // ── bootstrapPython: normal ───────────────────────────────────────────
@@ -164,30 +186,76 @@ test("the venv step invokes the configured absolute interpreter, never a bare na
     assert.equal(first.cmd, PYTHON);
     assert.ok(first.cmd.startsWith("/"), "the interpreter must be an absolute path");
     assert.notEqual(first.cmd, "python3", "a bare name would resolve under launchd to nothing");
-    assert.deepEqual(first.args, ["-m", "venv", join(dir, ".venv")]);
+    assert.deepEqual(first.args, ["-m", "venv", join(cfg.stateDir, ".venv")]);
     assert.equal(first.timeoutMs, 180_000);
   });
 });
 
-test("pip-upgrade and deps run through the venv interpreter, deps from projectDir", () => {
+test("the venv is built under stateDir, never under the replaceable projectDir", () => {
   withTmp((dir) => {
     const cfg = project(dir, ONE_MIGRATION);
     const run = runStub();
     bootstrapPython(cfg, { run });
 
-    const py = venvPython(dir);
+    const target = run.calls[0].args[2];
+    assert.equal(target, join(cfg.stateDir, ".venv"));
+    assert.equal(
+      target.startsWith(cfg.projectDir),
+      false,
+      "a venv inside projectDir is destroyed by the next `npm i -g`",
+    );
+  });
+});
+
+test("deps installs the project EDITABLE from projectDir while running out of stateDir", () => {
+  withTmp((dir) => {
+    const cfg = project(dir, ONE_MIGRATION);
+    const run = runStub();
+    bootstrapPython(cfg, { run });
+
+    const py = venvPython(cfg.stateDir);
     assert.equal(run.calls[1].cmd, py);
     assert.deepEqual(run.calls[1].args, ["-m", "pip", "install", "--upgrade", "pip", "-q"]);
     assert.equal(run.calls[1].timeoutMs, 300_000);
 
-    assert.equal(run.calls[2].cmd, py);
-    assert.deepEqual(run.calls[2].args, ["-m", "pip", "install", "-e", ".[dev]", "-q"]);
-    assert.equal(run.calls[2].timeoutMs, 900_000);
-    assert.equal(run.calls[2].opts?.cwd, dir, "`.[dev]` is only meaningful from projectDir");
+    // This assertion is the task: the interpreter (and therefore the venv) is
+    // stateDir's, and the editable *target* is projectDir. An editable install
+    // records projectDir as the import path, which is what keeps the venv
+    // usable after the package directory is replaced in place.
+    const deps = run.calls[2];
+    assert.equal(deps.cmd, py, "the venv interpreter installs, not the bare one");
+    assert.ok(deps.cmd.startsWith(cfg.stateDir), "the venv lives under stateDir");
+    assert.deepEqual(deps.args, [
+      "-m",
+      "pip",
+      "install",
+      "-e",
+      `${cfg.projectDir}[dev]`,
+      "-q",
+    ]);
+    assert.equal(deps.timeoutMs, 900_000);
+    assert.equal(deps.opts?.cwd, cfg.stateDir);
+    assert.notEqual(cfg.stateDir, cfg.projectDir, "guard: the fixture's roots must differ");
   });
 });
 
-test("migrations feed each .sql file to /usr/bin/sqlite3 on stdin, sorted by name", () => {
+test("the editable target is an absolute projectDir path, not a bare '.'", () => {
+  withTmp((dir) => {
+    const cfg = project(dir, ONE_MIGRATION);
+    const run = runStub();
+    bootstrapPython(cfg, { run });
+
+    const target = run.calls[2].args[4];
+    assert.ok(target.startsWith("/"), `editable target must be absolute, got ${target}`);
+    assert.equal(
+      target.startsWith("."),
+      false,
+      "`.` would resolve against cwd — which is stateDir now, where no pyproject.toml exists",
+    );
+  });
+});
+
+test("migrations read .sql from projectDir but write the DB under stateDir", () => {
   withTmp((dir) => {
     const cfg = project(dir, {
       "0010_late.sql": "-- late\n",
@@ -197,21 +265,41 @@ test("migrations feed each .sql file to /usr/bin/sqlite3 on stdin, sorted by nam
     const run = runStub();
     bootstrapPython(cfg, { run });
 
-    const db = join(dir, "data", "trades.sqlite");
+    const db = join(cfg.stateDir, "data", "trades.sqlite");
     const sqliteCalls = run.calls.filter((c) => c.cmd === SQLITE3);
     assert.equal(sqliteCalls.length, 3);
+    // The .sql files ship with the code, so they come from projectDir…
     assert.deepEqual(
       sqliteCalls.map((c) => c.opts?.stdinFile),
       [
-        join(dir, "data", "migrations", "0001_init.sql"),
-        join(dir, "data", "migrations", "0002_second.sql"),
-        join(dir, "data", "migrations", "0010_late.sql"),
+        join(cfg.projectDir, "data", "migrations", "0001_init.sql"),
+        join(cfg.projectDir, "data", "migrations", "0002_second.sql"),
+        join(cfg.projectDir, "data", "migrations", "0010_late.sql"),
       ],
     );
     for (const c of sqliteCalls) {
+      // …while the database they build is state, and must outlive an upgrade.
       assert.deepEqual(c.args, [db]);
+      assert.equal(
+        c.args[0].startsWith(cfg.projectDir),
+        false,
+        "a database under projectDir loses every trade on the next upgrade",
+      );
       assert.ok(c.timeoutMs > 0, "every call is bounded by a timeout");
     }
+  });
+});
+
+test("bootstrapPython creates <stateDir>/data before the first migration runs", () => {
+  withTmp((dir) => {
+    const cfg = project(dir, ONE_MIGRATION);
+    const dataDir = join(cfg.stateDir, "data");
+    assert.equal(existsSync(dataDir), false, "guard: the fixture must not pre-create it");
+
+    const results = bootstrapPython(cfg, { run: runStub() });
+
+    assert.equal(results[3].ok, true, results[3].detail);
+    assert.equal(existsSync(dataDir), true, "sqlite3 cannot create its parent directory");
   });
 });
 
@@ -239,15 +327,14 @@ test("bootstrapPython works with no onStep callback supplied", () => {
   });
 });
 
-test("bootstrapPython creates data/ before applying migrations", () => {
+test("the migrations step does not require <stateDir>/data to exist beforehand", () => {
   withTmp((dir) => {
-    // Fixture writes data/migrations, so remove data/ entirely and re-add only
-    // the migrations dir to prove the step does not depend on data/ existing.
-    const cfg = cfgFor(dir);
-    mkdirSync(join(dir, "data", "migrations"), { recursive: true });
+    const { projectDir, stateDir } = roots(dir);
+    const cfg = cfgFor(projectDir, stateDir);
+    mkdirSync(join(projectDir, "data", "migrations"), { recursive: true });
     const run = runStub();
     const results = bootstrapPython(cfg, { run });
-    assert.equal(results[3].ok, true);
+    assert.equal(results[3].ok, true, results[3].detail);
   });
 });
 
@@ -257,7 +344,7 @@ test("a failing deps step short-circuits: three results, no migrations step", ()
   withTmp((dir) => {
     const cfg = project(dir, ONE_MIGRATION);
     const run = runStub((c) =>
-      c.args.includes(".[dev]")
+      c.args.includes("-e")
         ? { code: 1, out: "ERROR: no matching distribution found for pandas" }
         : { code: 0, out: "" },
     );
@@ -352,11 +439,12 @@ test("a missing data/migrations directory fails the step rather than silently pa
   });
 });
 
-test("an unusable projectDir fails the migrations step instead of throwing", () => {
+test("an unusable stateDir fails the migrations step instead of throwing", () => {
   withTmp((dir) => {
-    // projectDir is a regular file, so mkdir of <projectDir>/data cannot work.
+    // stateDir is a regular file, so mkdir of <stateDir>/data cannot work.
     const asFile = writeFile(join(dir, "not-a-dir"));
-    const cfg = cfgFor(asFile);
+    const cfg = cfgFor(join(dir, "code"), asFile);
+    mkdirSync(join(dir, "code", "data", "migrations"), { recursive: true });
     let results: StepResult[] = [];
     assert.doesNotThrow(() => {
       results = bootstrapPython(cfg, { run: runStub() });
@@ -364,6 +452,21 @@ test("an unusable projectDir fails the migrations step instead of throwing", () 
     assert.equal(results.length, 4);
     assert.equal(results[3].ok, false);
     assert.notEqual(results[3].detail, "");
+    assert.ok(results[3].detail.includes(asFile), results[3].detail);
+  });
+});
+
+test("a missing projectDir fails the migrations step — the .sql files ship with the code", () => {
+  withTmp((dir) => {
+    // The state root is perfectly usable; the *code* is gone. That is the
+    // shape an interrupted upgrade takes, and it must not look bootstrapped.
+    const cfg = cfgFor(join(dir, "nonexistent-code"), join(dir, "state"));
+    let results: StepResult[] = [];
+    assert.doesNotThrow(() => {
+      results = bootstrapPython(cfg, { run: runStub() });
+    });
+    assert.equal(results[3].ok, false);
+    assert.match(results[3].detail, /migrations/);
   });
 });
 
@@ -409,10 +512,10 @@ test("a mix of fresh and already-applied migrations reports both counts", () => 
   });
 });
 
-test("an existing .venv/bin/python skips the venv step without invoking run", () => {
+test("an existing <stateDir>/.venv/bin/python skips the venv step without invoking run", () => {
   withTmp((dir) => {
     const cfg = project(dir, ONE_MIGRATION);
-    writeExe(venvPython(dir));
+    writeExe(venvPython(cfg.stateDir));
     const run = runStub();
     const results = bootstrapPython(cfg, { run });
 
@@ -424,14 +527,30 @@ test("an existing .venv/bin/python skips the venv step without invoking run", ()
       false,
       "the interpreter must not be asked to build a venv that exists",
     );
-    assert.equal(run.calls[0].cmd, venvPython(dir), "the first run call is pip-upgrade");
+    assert.equal(run.calls[0].cmd, venvPython(cfg.stateDir), "the first run call is pip-upgrade");
+  });
+});
+
+test("a venv under the OLD projectDir location does not count as bootstrapped", () => {
+  withTmp((dir) => {
+    // This is exactly what an 0.2.0 install leaves behind. Reusing it would
+    // keep the venv inside the directory `npm i -g` replaces — the bug the
+    // whole state-root move exists to fix.
+    const cfg = project(dir, ONE_MIGRATION);
+    writeExe(venvPython(cfg.projectDir));
+    const run = runStub();
+    const results = bootstrapPython(cfg, { run });
+
+    assert.equal(results[0].detail, "created", "a venv at the legacy path must not be adopted");
+    assert.equal(run.calls[0].cmd, PYTHON);
+    assert.deepEqual(run.calls[0].args, ["-m", "venv", join(cfg.stateDir, ".venv")]);
   });
 });
 
 test("a non-executable .venv/bin/python is rebuilt rather than trusted", () => {
   withTmp((dir) => {
     const cfg = project(dir, ONE_MIGRATION);
-    writeFile(venvPython(dir), "truncated\n");
+    writeFile(venvPython(cfg.stateDir), "truncated\n");
     const run = runStub();
     const results = bootstrapPython(cfg, { run });
 
@@ -475,38 +594,62 @@ test("non-.sql entries in the migrations directory are ignored", () => {
 
 // ── isBootstrapped ────────────────────────────────────────────────────
 
-test("isBootstrapped is true only with both an executable venv python and the db", () => {
+test("isBootstrapped is true only with both an executable venv python and the db, both under stateDir", () => {
   withTmp((dir) => {
-    writeExe(venvPython(dir));
-    writeFile(join(dir, "data", "trades.sqlite"), "");
-    assert.equal(isBootstrapped(cfgFor(dir)), true);
+    const { projectDir, stateDir } = roots(dir);
+    writeExe(venvPython(stateDir));
+    writeFile(join(stateDir, "data", "trades.sqlite"), "");
+    assert.equal(isBootstrapped(cfgFor(projectDir, stateDir)), true);
   });
 });
 
 test("isBootstrapped is false when the venv interpreter is missing", () => {
   withTmp((dir) => {
-    writeFile(join(dir, "data", "trades.sqlite"), "");
-    assert.equal(isBootstrapped(cfgFor(dir)), false);
+    const { projectDir, stateDir } = roots(dir);
+    writeFile(join(stateDir, "data", "trades.sqlite"), "");
+    assert.equal(isBootstrapped(cfgFor(projectDir, stateDir)), false);
   });
 });
 
 test("isBootstrapped is false when the database is missing", () => {
   withTmp((dir) => {
-    writeExe(venvPython(dir));
-    assert.equal(isBootstrapped(cfgFor(dir)), false);
+    const { projectDir, stateDir } = roots(dir);
+    writeExe(venvPython(stateDir));
+    assert.equal(isBootstrapped(cfgFor(projectDir, stateDir)), false);
   });
 });
 
-test("isBootstrapped is false for a non-executable venv python and for an empty project", () => {
+test("isBootstrapped ignores a venv and a database sitting at the legacy projectDir paths", () => {
   withTmp((dir) => {
-    writeFile(venvPython(dir), "truncated\n");
-    writeFile(join(dir, "data", "trades.sqlite"), "");
-    assert.equal(isBootstrapped(cfgFor(dir)), false, "a half-written venv is not a venv");
+    // A 0.2.0 install, seen by the new code: everything is under projectDir and
+    // nothing under stateDir. Reporting `true` here would skip the bootstrap
+    // that is supposed to relocate them.
+    const { projectDir, stateDir } = roots(dir);
+    writeExe(venvPython(projectDir));
+    writeFile(join(projectDir, "data", "trades.sqlite"), "");
+    assert.equal(isBootstrapped(cfgFor(projectDir, stateDir)), false);
+  });
+});
+
+test("isBootstrapped is false for a non-executable venv python and for an empty state root", () => {
+  withTmp((dir) => {
+    const { projectDir, stateDir } = roots(dir);
+    writeFile(venvPython(stateDir), "truncated\n");
+    writeFile(join(stateDir, "data", "trades.sqlite"), "");
+    assert.equal(
+      isBootstrapped(cfgFor(projectDir, stateDir)),
+      false,
+      "a half-written venv is not a venv",
+    );
   });
   withTmp((dir) => {
-    assert.equal(isBootstrapped(cfgFor(dir)), false);
+    const { projectDir, stateDir } = roots(dir);
+    assert.equal(isBootstrapped(cfgFor(projectDir, stateDir)), false);
   });
-  assert.equal(isBootstrapped(cfgFor("/nonexistent/kis-trader-project")), false);
+  assert.equal(
+    isBootstrapped(cfgFor("/nonexistent/kis-trader-code", "/nonexistent/kis-trader-state")),
+    false,
+  );
 });
 
 // ── defaultRun (the real spawn path) ──────────────────────────────────
