@@ -263,7 +263,26 @@ export function runDoctor(deps: Partial<DoctorDeps> = {}): Check[] {
   const cfg: Config = parsed.value;
   add("config", "pass", `${cfg.mode} mode, project ${cfg.projectDir}`);
 
-  // 2. python
+  // 2. state-dir — the root the venv, database and logs hang off. A state dir
+  //    inside `projectDir` is exactly the configuration this phase exists to
+  //    prevent: `npm i -g` replaces that directory wholesale, destroying the
+  //    venv and the trade history with it.
+  const insideProject =
+    cfg.stateDir === cfg.projectDir || cfg.stateDir.startsWith(cfg.projectDir + "/");
+  if (!d.fileExists(cfg.stateDir)) {
+    add("state-dir", "fail", `no directory at ${cfg.stateDir}`, HINT_INIT);
+  } else if (insideProject) {
+    add(
+      "state-dir",
+      "fail",
+      `${cfg.stateDir} is inside the project directory ${cfg.projectDir}`,
+      "an npm upgrade replaces the project directory and would destroy the venv and trade history — move the state dir outside it (e.g. ~/.kis-trader) and re-run: kis-trader init",
+    );
+  } else {
+    add("state-dir", "pass", cfg.stateDir);
+  }
+
+  // 3. python
   const version = d.pythonVersion(cfg.pythonPath);
   if (isSupported(version) && version) {
     add("python", "pass", `${version[0]}.${version[1]} at ${cfg.pythonPath}`);
@@ -283,8 +302,8 @@ export function runDoctor(deps: Partial<DoctorDeps> = {}): Check[] {
     );
   }
 
-  // 3. venv — its outcome also decides whether the KIS probe can run at all.
-  const py = venvPython(cfg.projectDir);
+  // 4. venv — its outcome also decides whether the KIS probe can run at all.
+  const py = venvPython(cfg.stateDir);
   const venvOk = d.isExecutableFile(py);
   if (venvOk) {
     add("venv", "pass", py);
@@ -292,15 +311,15 @@ export function runDoctor(deps: Partial<DoctorDeps> = {}): Check[] {
     add("venv", "fail", `no interpreter at ${py}`, HINT_INIT);
   }
 
-  // 4. database
-  const db = join(cfg.projectDir, "data", "trades.sqlite");
+  // 5. database
+  const db = join(cfg.stateDir, "data", "trades.sqlite");
   if (d.fileExists(db)) {
     add("database", "pass", db);
   } else {
     add("database", "fail", `no database at ${db}`, HINT_INIT);
   }
 
-  // 5. keychain-kis — all three items, for the configured mode only.
+  // 6. keychain-kis — all three items, for the configured mode only.
   try {
     const missing = (["appkey", "secret", "account"] as const)
       .map((kind) => kisAccount(cfg.mode, kind))
@@ -320,7 +339,7 @@ export function runDoctor(deps: Partial<DoctorDeps> = {}): Check[] {
     add("keychain-kis", "fail", detail, hint);
   }
 
-  // 6. keychain-telegram — optional as a whole, incoherent in halves. Neither
+  // 7. keychain-telegram — optional as a whole, incoherent in halves. Neither
   //    item is a deliberate choice; one item is a half-finished setup that
   //    fails at the first notification.
   try {
@@ -351,7 +370,7 @@ export function runDoctor(deps: Partial<DoctorDeps> = {}): Check[] {
     add("keychain-telegram", "fail", detail, hint);
   }
 
-  // 7. keychain-krx — the signal producer's KRX login. Optional as a pair: KRX
+  // 8. keychain-krx — the signal producer's KRX login. Optional as a pair: KRX
   //    serves the same listings unauthenticated, so absence degrades the
   //    producer rather than breaking it (D4). One half is neither state — it is
   //    a setup that was interrupted, and it fails at the first authenticated
@@ -386,7 +405,7 @@ export function runDoctor(deps: Partial<DoctorDeps> = {}): Check[] {
     add("keychain-krx", "fail", detail, hint);
   }
 
-  // 8. keychain-brave — a single optional item, so absent is simply off (D4).
+  // 9. keychain-brave — a single optional item, so absent is simply off (D4).
   try {
     if (d.keychainHas(SIGNAL_SERVICE, BRAVE_KEY_ACCOUNT)) {
       add("keychain-brave", "pass", "Brave Search API key stored");
@@ -403,7 +422,7 @@ export function runDoctor(deps: Partial<DoctorDeps> = {}): Check[] {
     add("keychain-brave", "fail", detail, hint);
   }
 
-  // 9. llm-agent
+  // 10. llm-agent
   const agents = d.detectAgents();
   const configured = agents[cfg.llmAgent];
   const found = (Object.keys(agents) as SupportedCli[]).filter((k) => agents[k] !== null);
@@ -426,7 +445,7 @@ export function runDoctor(deps: Partial<DoctorDeps> = {}): Check[] {
     );
   }
 
-  // 10. news-backend — the producer's news enrichment. Its binary is resolved
+  // 11. news-backend — the producer's news enrichment. Its binary is resolved
   //     from the same detection pass as `llm-agent`: they are independent
   //     settings, so the configured backend is looked up on its own. "none" is
   //     a deliberate choice, not a gap; anything else that is not installed
@@ -448,7 +467,7 @@ export function runDoctor(deps: Partial<DoctorDeps> = {}): Check[] {
     }
   }
 
-  // 11. signal-dir — existence *and* freshness (D12). A directory that exists
+  // 12. signal-dir — existence *and* freshness (D12). A directory that exists
   //     but stopped being written to looks healthy to `existsSync` and is not.
   //     The producer ships in this package, so every hint names the command
   //     that writes a file on demand rather than an external project.
@@ -483,7 +502,7 @@ export function runDoctor(deps: Partial<DoctorDeps> = {}): Check[] {
     }
   }
 
-  // 12. kis-api — a real round trip, run inside the venv so the credentials stay
+  // 13. kis-api — a real round trip, run inside the venv so the credentials stay
   //    in the Python process (D18). Nothing is spawned without an interpreter
   //    to spawn: a missing venv is already reported above.
   if (!venvOk) {
@@ -566,7 +585,7 @@ export function runDoctor(deps: Partial<DoctorDeps> = {}): Check[] {
     }
   }
 
-  // 13. jobs — one per key in the config schema, which is the job inventory
+  // 14. jobs — one per key in the config schema, which is the job inventory
   //     (WIKI infrastructure-config-environment-config rule 4), so the two
   //     signal jobs are reported by the same loop, from `launchctl` itself
   //     (WIKI platforms-processes-background-services rule 4) rather than from
