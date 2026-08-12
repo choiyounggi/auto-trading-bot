@@ -22,6 +22,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(mes
 
 from src.broker.kis_client import KisClient  # noqa: E402
 from src.guardrails.rules import load_rules  # noqa: E402
+from src.orchestrator.capital import position_eval_won  # noqa: E402
 from src.orchestrator.entry_decision import (  # noqa: E402
     AccountSnapshot,
     evaluate_candidate,
@@ -69,6 +70,8 @@ def main() -> int:
 
     account = AccountSnapshot(
         cash_won=balance.cash,
+        total_asset_won=balance.total_eval,
+        invested_won=position_eval_won(balance.positions),
         open_positions=0,           # dry-run — 가상 0
         daily_pnl_pct=0.0,
         daily_entries_today=0,
@@ -82,6 +85,7 @@ def main() -> int:
     print(f"  TP cap: {rules.min_take_profit_pct}~{rules.max_take_profit_pct}%")
     print(f"  max_hold_days: {rules.max_hold_days} 영업일")
     print(f"  self-consistency: {rules.entry_self_consistency}회 호출")
+    print(f"  가동률 목표: {rules.target_utilization_pct}%")
 
     for cand in all_buys:
         print(f"\n{'='*60}")
