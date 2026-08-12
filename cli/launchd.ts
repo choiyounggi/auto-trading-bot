@@ -1,5 +1,5 @@
 /**
- * launchd LaunchAgents for the five trading jobs: render, install, uninstall,
+ * launchd LaunchAgents for the nine trading jobs: render, install, uninstall,
  * status.
  *
  * The plists are rendered at runtime from the user's config rather than shipped
@@ -109,7 +109,20 @@ export interface JobSpec {
 }
 
 /**
- * The eight jobs, with the schedules the previously hand-installed plists ran on.
+ * Reallocation check times — weekdays 09:30 through 15:00, every 30 minutes,
+ * 12 times.
+ *
+ * After the 09:05 entry job has finished, up to just before the regular
+ * session closes (15:30). Paper fills only happen during the regular
+ * session, so no time after it is scheduled.
+ */
+const CASH_DEPLOY_TIMES = Array.from({ length: 12 }, (_, i) => {
+  const minutes = 9 * 60 + 30 + i * 30;
+  return { hour: Math.floor(minutes / 60), minute: minutes % 60 };
+});
+
+/**
+ * The nine jobs, with the schedules the previously hand-installed plists ran on.
  * Keyed by `JobName`, so a job added to `config.ts` without a schedule here is a
  * type error rather than a job that silently never installs.
  *
@@ -136,6 +149,18 @@ export const JOBS: Record<JobKey, JobSpec> = {
     args: ["-m", "src.orchestrator", "--dip-only"],
     schedule: { hour: 15, minute: 0 },
     log: "dipBuy.log",
+  },
+  // Intraday cash reallocation — reinvests cash freed by an exit the same day.
+  // 30-minute cadence means the previous run can still be going, so this is
+  // guarded: an overlapping run exits 0 immediately. The Python side caps
+  // candidates per run at 4 (cash_deploy.max_candidates_per_run), bounding a
+  // single run to at most 4 x 180s = 12 minutes, comfortably inside
+  // STALE_LOCK_MINUTES (15).
+  cashDeploy: {
+    args: ["-m", "src.orchestrator", "--deploy-cash"],
+    schedule: { times: CASH_DEPLOY_TIMES },
+    log: "cashDeploy.log",
+    guarded: true,
   },
   usOrchestrator: {
     args: ["-m", "src.orchestrator", "--asset-class", "overseas_stock"],
