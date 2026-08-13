@@ -47,8 +47,9 @@ const UID = process.getuid?.() ?? 0;
 const CFG: Config = {
   mode: "paper",
   projectDir: "/Users/alice/auto-trading-bot",
+  stateDir: "/Users/alice/.kis-trader",
   pythonPath: "/abs/python3.11",
-  signalDir: "/Users/alice/.kis-trader/signals",
+  signalDir: "/Users/alice/.kis-trader/data/signals",
   llmAgent: "claude",
   newsLlmBackend: "none",
   jobs: {
@@ -56,11 +57,23 @@ const CFG: Config = {
     monitor: true,
     reconciler: true,
     dipBuy: true,
+    cashDeploy: true,
     usOrchestrator: true,
     signalKr: true,
     signalUs: true,
+    telegramAgent: true,
   },
 };
+
+/**
+ * The interpreter every job must run.
+ *
+ * Measured on this machine: the bare interpreter at `cfg.pythonPath` has no
+ * pydantic, no sqlalchemy and no pandas — a job that runs it dies with an
+ * ImportError the moment launchd starts it. The dependencies live in the venv
+ * under `stateDir`, so that is the only correct interpreter for a plist.
+ */
+const VENV_PY = "/Users/alice/.kis-trader/.venv/bin/python";
 
 /** A KIS_TRADER_HOME used only as an interpolated string (never written to). */
 const HOME_STR = "/kis-home";
@@ -183,7 +196,7 @@ test("plistPath lands in ~/Library/LaunchAgents", () => {
 
 // ── renderPlist: normal ───────────────────────────────────────────────
 
-test("renderPlist(orchestrator) writes the absolute interpreter, args and signal dir", () => {
+test("renderPlist(orchestrator) writes the venv interpreter, args and signal dir", () => {
   const out = renderPlist("orchestrator", CFG, HOME_STR, "alice");
 
   assert.ok(out.startsWith('<?xml version="1.0" encoding="UTF-8"?>\n'));
@@ -191,13 +204,43 @@ test("renderPlist(orchestrator) writes the absolute interpreter, args and signal
   assert.ok(out.trimEnd().endsWith("</plist>"));
 
   assert.ok(out.includes("<string>com.alice.kistrader.orchestrator</string>"));
-  assert.ok(out.includes("<string>/abs/python3.11</string>"), "absolute interpreter");
+  assert.ok(out.includes(`<string>${VENV_PY}</string>`), "venv interpreter");
   assert.ok(!/<string>python3(\.\d+)?<\/string>/.test(out), "no bare python3");
   assert.ok(out.includes("<string>--carry-over</string>"));
   assert.ok(out.includes("<string>src.orchestrator</string>"));
   assert.ok(out.includes(`<string>${CFG.projectDir}</string>`), "WorkingDirectory");
   assert.ok(out.includes("<key>KIS_TRADER_SIGNAL_DIR</key>"));
   assert.ok(out.includes(`<string>${CFG.signalDir}</string>`));
+});
+
+test("EVERY job's interpreter is the venv python under stateDir, never the bare one", () => {
+  // The measured failure this guards: the bare interpreter at cfg.pythonPath
+  // has no pydantic, sqlalchemy or pandas, so a job pointed at it dies with an
+  // ImportError on its first scheduled run — silently, into a log nobody reads.
+  for (const job of JOB_KEYS) {
+    const out = renderPlist(job, CFG, HOME_STR, "alice");
+    assert.ok(
+      out.includes(`<string>${VENV_PY}</string>`) || guardScript(job, CFG, HOME_STR).includes(VENV_PY),
+      `${job} does not run the venv interpreter`,
+    );
+    assert.equal(
+      out.includes(`<string>${CFG.pythonPath}</string>`),
+      false,
+      `${job} still renders the bare interpreter ${CFG.pythonPath}`,
+    );
+  }
+});
+
+test("the guarded jobs run the venv interpreter inside their sh script too", () => {
+  for (const job of ["signalKr", "signalUs", "cashDeploy"] as const) {
+    const script = guardScript(job, CFG, HOME_STR);
+    assert.ok(script.includes(VENV_PY), `${job}'s guard must invoke the venv interpreter`);
+    assert.equal(
+      script.includes(`'${CFG.pythonPath}'`),
+      false,
+      `${job}'s guard still invokes the bare interpreter`,
+    );
+  }
 });
 
 test("renderPlist(orchestrator) emits exactly five weekday dicts at 09:05", () => {
@@ -282,9 +325,56 @@ test("renderPlist routes stdout and stderr to separate files under the state hom
 
 test("renderPlist never sets KeepAlive on a one-shot job", () => {
   for (const key of JOB_KEYS) {
+    if (key === "telegramAgent") continue; // the one genuine daemon — asserted below
     const out = renderPlist(key, CFG, HOME_STR, "alice");
     assert.ok(!out.includes("KeepAlive"), `${key} must not be restarted in a loop`);
+    assert.ok(!out.includes("RunAtLoad"), `${key} must not fire at login as well as on schedule`);
+    assert.ok(!out.includes("ThrottleInterval"), `${key} has nothing to throttle`);
   }
+});
+
+// ── the keepAlive schedule form (telegramAgent) ───────────────────────
+
+test("telegramAgent renders RunAtLoad, KeepAlive and ThrottleInterval 30", () => {
+  const out = renderPlist("telegramAgent", CFG, HOME_STR, "alice");
+
+  assert.match(out, /<key>RunAtLoad<\/key>\s*<true\/>/);
+  assert.match(out, /<key>KeepAlive<\/key>\s*<true\/>/);
+  assert.match(out, /<key>ThrottleInterval<\/key>\s*<integer>30<\/integer>/);
+  assertParses(out);
+});
+
+test("telegramAgent carries no calendar or interval schedule", () => {
+  // A supervised daemon is restarted by launchd itself (KeepAlive). Adding a
+  // schedule on top would have launchd start a second copy on a timer.
+  const out = renderPlist("telegramAgent", CFG, HOME_STR, "alice");
+
+  assert.ok(!out.includes("StartCalendarInterval"), "a KeepAlive daemon has no calendar");
+  assert.ok(!out.includes("StartInterval"), "a KeepAlive daemon has no interval");
+  assert.equal(count(out, "<key>Weekday</key>"), 0);
+});
+
+test("telegramAgent runs the adopted daemon's module through the venv interpreter", () => {
+  const out = renderPlist("telegramAgent", CFG, HOME_STR, "alice");
+
+  assert.deepEqual(JOBS.telegramAgent.args, ["-m", "src.agent.telegram_agent"]);
+  assert.deepEqual(JOBS.telegramAgent.schedule, { keepAlive: true });
+  assert.equal(JOBS.telegramAgent.log, "telegramAgent.log");
+  assert.ok(out.includes(`<string>${VENV_PY}</string>`));
+  assert.ok(out.includes("<string>src.agent.telegram_agent</string>"));
+  assert.ok(out.includes("<string>/kis-home/logs/telegramAgent.log</string>"));
+  assert.ok(out.includes("<string>/kis-home/logs/telegramAgent.err.log</string>"));
+});
+
+test("telegramAgent is NOT wrapped in the sh guard — a daemon holds its lock forever", () => {
+  const out = renderPlist("telegramAgent", CFG, HOME_STR, "alice");
+
+  assert.equal(JOBS.telegramAgent.guarded, undefined);
+  assert.ok(!out.includes("<string>/bin/sh</string>"), "a KeepAlive daemon must not be guarded");
+  assert.ok(!out.includes("mkdir"), "no lock script");
+  // The guard exists to skip an *overlapping* scheduled run; a process that
+  // never exits would take the lock at boot and block nothing but itself.
+  assert.equal(out.includes(lockPath("telegramAgent", HOME_STR)), false);
 });
 
 test("renderPlist(monitor) uses StartInterval and no calendar schedule", () => {
@@ -629,17 +719,32 @@ test("signalUs emits one entry per weekday per time — 5 x 2 = 10", () => {
   assertParses(xml);
 });
 
-test("the single-time and interval forms render exactly as before", () => {
-  // Regression guard on the schedule refactor: adding the `times` form must not
-  // change what the five existing jobs emit.
+test("the three pre-existing schedule forms render exactly as before", () => {
+  // Regression guard on the schedule refactor: adding the `keepAlive` form must
+  // not change a byte of what the seven existing jobs emit.
   const single = renderPlist("orchestrator", CFG, HOME_STR, "tester");
   assert.equal(weekdayCount(single), 5);
   assert.match(single, /<key>Hour<\/key><integer>9<\/integer><key>Minute<\/key><integer>5<\/integer>/);
+  assert.match(
+    single,
+    /<key>StartCalendarInterval<\/key>\n {2}<array>\n/,
+    "the calendar block's exact layout is part of the regression guard",
+  );
+
+  const times = renderPlist("signalUs", CFG, HOME_STR, "tester");
+  assert.equal(weekdayCount(times), 10);
 
   const interval = renderPlist("monitor", CFG, HOME_STR, "tester");
   assert.equal(weekdayCount(interval), 0);
-  assert.match(interval, /<key>StartInterval<\/key>\s*<integer>300<\/integer>/);
+  assert.match(interval, /<key>StartInterval<\/key>\n {2}<integer>300<\/integer>\n/);
   assert.doesNotMatch(interval, /StartCalendarInterval/);
+
+  // And none of the three acquired the daemon keys.
+  for (const xml of [single, times, interval]) {
+    for (const key of ["RunAtLoad", "KeepAlive", "ThrottleInterval"]) {
+      assert.ok(!xml.includes(key), `${key} leaked into a scheduled job`);
+    }
+  }
 });
 
 test("a guarded job runs under sh with the lock, the stale reclaim and a trap", () => {
@@ -652,7 +757,7 @@ test("a guarded job runs under sh with the lock, the stale reclaim and a trap", 
   assert.match(script, /mkdir "\$L"/, "mkdir is the lock — it is atomic on POSIX");
   assert.match(script, /-mmin \+15/, "a crashed run must not hold the lock forever");
   assert.match(script, /trap '.*rmdir/, "the normal path releases the lock");
-  assert.ok(script.includes(CFG.pythonPath), "the interpreter is the configured absolute path");
+  assert.ok(script.includes(VENV_PY), "the interpreter is the venv's absolute path");
   assert.doesNotMatch(script, /\bpython3\b(?!\.)/, "never a bare python3");
 });
 
@@ -660,26 +765,30 @@ test("the guard uses only tools that ship with macOS", () => {
   // Measured on a stock Mac: /usr/bin/flock and /usr/bin/timeout do not exist,
   // and the Homebrew timeout is only present where coreutils was installed —
   // which a package shipped to arbitrary Macs cannot assume.
-  for (const job of ["signalKr", "signalUs"] as const) {
+  for (const job of ["signalKr", "signalUs", "cashDeploy"] as const) {
     const script = guardScript(job, CFG, HOME_STR);
     assert.doesNotMatch(script, /flock/, `${job} must not depend on flock`);
     assert.doesNotMatch(script, /timeout/, `${job} must not depend on timeout`);
   }
 });
 
-test("only the signal jobs are guarded; the trading jobs keep their argv", () => {
+test("only the guarded jobs run under sh; every other job keeps a direct argv", () => {
+  const guardedSeen: string[] = [];
+  const guardedJobs = new Set(["signalKr", "signalUs", "cashDeploy"]);
   for (const job of JOB_KEYS) {
     const xml = renderPlist(job, CFG, HOME_STR, "tester");
-    const guarded = job === "signalKr" || job === "signalUs";
+    const guarded = guardedJobs.has(job);
     assert.equal(
       xml.includes("<string>/bin/sh</string>"),
       guarded,
       `${job} guarded should be ${guarded}`,
     );
-    if (!guarded) {
-      assert.ok(xml.includes(`<string>${CFG.pythonPath}</string>`), `${job} calls python directly`);
-    }
+    if (guarded) guardedSeen.push(job);
+    else assert.ok(xml.includes(`<string>${VENV_PY}</string>`), `${job} calls python directly`);
   }
+  // Stated as a whole-set assertion so a fourth guarded job cannot slip in.
+  // JOB_KEYS order puts cashDeploy ahead of the two signal jobs.
+  assert.deepEqual(guardedSeen, ["cashDeploy", "signalKr", "signalUs"]);
 });
 
 test("every job, including the new two, renders a plist plutil accepts", () => {
@@ -699,14 +808,55 @@ test("the guard does not exec — exec would discard the trap and orphan the loc
   // fires, and a *successful* run leaves its lock directory behind. The job
   // then only starts again once the staleness window has passed, which for a
   // job scheduled twice an hour would silently drop runs.
-  for (const job of ["signalKr", "signalUs"] as const) {
+  for (const job of ["signalKr", "signalUs", "cashDeploy"] as const) {
     const script = guardScript(job, CFG, HOME_STR);
     assert.doesNotMatch(script, /\bexec\b/, `${job}'s guard must not exec`);
     // The trap must still be there, and before the command it protects.
     const trapAt = script.indexOf("trap ");
-    const cmdAt = script.indexOf(CFG.pythonPath);
+    const cmdAt = script.indexOf(VENV_PY);
     assert.ok(trapAt >= 0, "the release trap is present");
     assert.ok(cmdAt > trapAt, "the trap is armed before the command runs");
+  }
+});
+
+// ── projectDir vs the state home ──────────────────────────────────────
+
+test("WorkingDirectory is projectDir — `python -m src.x` needs the code on sys.path", () => {
+  for (const job of JOB_KEYS) {
+    const xml = renderPlist(job, CFG, HOME_STR, "tester");
+    assert.ok(
+      xml.includes(
+        `<key>WorkingDirectory</key>\n  <string>${CFG.projectDir}</string>`,
+      ),
+      `${job} lost its WorkingDirectory`,
+    );
+  }
+});
+
+test("no path the jobs WRITE to derives from projectDir — logs and locks live under home", () => {
+  // projectDir is replaced wholesale by `npm i -g`. It may be *read* from (the
+  // code, sys.path) but nothing written may land there, or an upgrade destroys
+  // it. Rendering with a home that shares no prefix with projectDir makes any
+  // stray projectDir-derived write path visible.
+  const home = "/kis-home";
+  for (const job of JOB_KEYS) {
+    const xml = renderPlist(job, CFG, home, "tester");
+    for (const key of ["StandardOutPath", "StandardErrorPath"] as const) {
+      const m = xml.match(new RegExp(`<key>${key}</key>\\n  <string>([^<]*)</string>`));
+      assert.ok(m, `${job} has no ${key}`);
+      assert.ok(m![1].startsWith(`${home}/`), `${job}'s ${key} is ${m![1]}, not under the state home`);
+    }
+    if (JOBS[job].guarded) {
+      assert.ok(
+        guardScript(job, CFG, home).includes(lockPath(job, home)),
+        `${job}'s lock must live under the state home`,
+      );
+      assert.equal(
+        guardScript(job, CFG, home).includes(`${CFG.projectDir}/locks`),
+        false,
+        `${job}'s lock must not land in the package directory`,
+      );
+    }
   }
 });
 
@@ -778,5 +928,62 @@ test("guard: the job's own exit status survives the wrapper", () => {
     existsSync(lockPath("signalKr", home)),
     false,
     "a failing run still releases its lock",
+  );
+});
+
+// ── cashDeploy: 30-minute intraday redeployment ─────────────────────────
+
+test("cashDeploy runs 12 times per weekday, 09:30 to 15:00 — 5 x 12 = 60", () => {
+  const xml = renderPlist("cashDeploy", CFG, HOME_STR, "tester");
+  assert.equal(weekdayCount(xml), 60);
+  assertParses(xml);
+});
+
+test("cashDeploy's first slot is 09:30 and its last is 15:00 — off-by-one guard", () => {
+  const xml = renderPlist("cashDeploy", CFG, HOME_STR, "tester");
+  assert.match(
+    xml,
+    /<key>Hour<\/key><integer>9<\/integer><key>Minute<\/key><integer>30<\/integer>/,
+  );
+  assert.match(
+    xml,
+    /<key>Hour<\/key><integer>15<\/integer><key>Minute<\/key><integer>0<\/integer>/,
+  );
+  assert.doesNotMatch(
+    xml,
+    /<key>Hour<\/key><integer>9<\/integer><key>Minute<\/key><integer>0<\/integer>/,
+    "09:00 must not be scheduled — the first slot is 09:30",
+  );
+  assert.doesNotMatch(
+    xml,
+    /<key>Hour<\/key><integer>15<\/integer><key>Minute<\/key><integer>30<\/integer>/,
+    "15:30 must not be scheduled — the last slot is 15:00",
+  );
+});
+
+test("cashDeploy is guarded — ProgramArguments starts with /bin/sh -c", () => {
+  const xml = renderPlist("cashDeploy", CFG, HOME_STR, "tester");
+  assert.equal(JOBS.cashDeploy.guarded, true);
+  assert.match(
+    xml,
+    /<key>ProgramArguments<\/key>\n {2}<array>\n {4}<string>\/bin\/sh<\/string>\n {4}<string>-c<\/string>\n/,
+  );
+});
+
+test("cashDeploy's fixed string contract: --deploy-cash, cashDeploy.log, cashDeploy.lock", () => {
+  assert.deepEqual(JOBS.cashDeploy.args, ["-m", "src.orchestrator", "--deploy-cash"]);
+  assert.equal(JOBS.cashDeploy.log, "cashDeploy.log");
+
+  const xml = renderPlist("cashDeploy", CFG, HOME_STR, "tester");
+  // Guarded jobs wrap the argv in a single `sh -c` string (see guardScript),
+  // so `--deploy-cash` shows up shell-quoted inside that string rather than
+  // as its own `<string>` element.
+  assert.ok(xml.includes("--deploy-cash"));
+  assert.ok(xml.includes(`${HOME_STR}/logs/cashDeploy.log`));
+  assert.ok(xml.includes(`${HOME_STR}/logs/cashDeploy.err.log`));
+
+  assert.equal(lockPath("cashDeploy", HOME_STR), `${HOME_STR}/locks/cashDeploy.lock`);
+  assert.ok(
+    guardScript("cashDeploy", CFG, HOME_STR).includes(lockPath("cashDeploy", HOME_STR)),
   );
 });

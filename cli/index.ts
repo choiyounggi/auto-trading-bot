@@ -18,10 +18,22 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { printBanner, readPackageVersion } from "./banner.js";
-import { venvPython } from "./bootstrap.js";
+import {
+  bootstrapPython,
+  venvPython,
+  type BootstrapOptions,
+  type StepResult,
+} from "./bootstrap.js";
 import { configHome, JOB_KEYS, loadConfig, type Config, type JobName } from "./config.js";
 import { exitCodeFor, formatChecks, runDoctor } from "./doctor.js";
-import { installJob, jobStatus, uninstallJob, JOBS, type JobKey } from "./launchd.js";
+import {
+  installJob,
+  jobStatus,
+  uninstallJob,
+  JOBS,
+  type InstallResult,
+  type JobKey,
+} from "./launchd.js";
 import { runInit } from "./setup.js";
 
 /** The published name — `upgrade` reinstalls exactly this package. */
@@ -150,12 +162,15 @@ function cmdStart(rest: string[]): number {
 
   // spawnSync, not spawn: `stdio: "inherit"` streams identically either way,
   // and the synchronous form is what lets the child's exit code become ours.
-  const child = spawnSync(venvPython(cfg.projectDir), JOBS[job].args, {
+  // The interpreter lives under the state root — the venv there is what an
+  // upgrade of `projectDir` cannot destroy; the code it runs still ships in
+  // `projectDir`, which stays the working directory.
+  const child = spawnSync(venvPython(cfg.stateDir), JOBS[job].args, {
     stdio: "inherit",
     cwd: cfg.projectDir,
   });
   if (child.error !== undefined) {
-    err.write(`could not run ${venvPython(cfg.projectDir)}: ${child.error.message}\n`);
+    err.write(`could not run ${venvPython(cfg.stateDir)}: ${child.error.message}\n`);
     return 1;
   }
   return child.status ?? 1;
@@ -225,20 +240,83 @@ function cmdStatus(): number {
   return 0;
 }
 
-function cmdUpgrade(): number {
-  const child = spawnSync("npm", ["install", "-g", `${PACKAGE_NAME}@latest`], {
-    stdio: "inherit",
-  });
-  if (child.error !== undefined) {
-    err.write(`could not run npm: ${child.error.message}\n`);
+/**
+ * Every collaborator `upgrade` uses that reaches outside this process.
+ *
+ * The real implementations are the default; a test replaces them wholesale,
+ * which is what lets the sequence run under `npm test` without installing
+ * anything on the machine.
+ */
+export interface UpgradeDeps {
+  /** Runs `npm install -g <package>@latest`. `error` is set when npm never ran. */
+  installCode: () => { code: number; error?: string };
+  /** The config every later step needs, or `null` once the reason is reported. */
+  config: () => Config | null;
+  bootstrapPython: (cfg: Config, opts: BootstrapOptions) => StepResult[];
+  installJob: (job: JobKey, cfg: Config, home: string) => InstallResult;
+}
+
+const defaultUpgradeDeps: UpgradeDeps = {
+  installCode: () => {
+    const child = spawnSync("npm", ["install", "-g", `${PACKAGE_NAME}@latest`], {
+      stdio: "inherit",
+    });
+    if (child.error !== undefined) return { code: 1, error: child.error.message };
+    return { code: child.status ?? 1 };
+  },
+  config: requireConfig,
+  bootstrapPython: (cfg, opts) => bootstrapPython(cfg, opts),
+  installJob: (job, cfg, home) => installJob(job, cfg, home),
+};
+
+/**
+ * The upgrade sequence: install the code, re-bootstrap Python, reinstall the
+ * jobs — strictly in that order, and each step only after the previous one
+ * succeeded.
+ *
+ * The middle step exists because swapping the code alone is a half-upgrade:
+ * the new release may declare dependencies the venv has never installed, and
+ * the first new import then dies with `No module named …`. Jobs come last so
+ * that a failed dependency install leaves the *old* jobs running rather than
+ * arming new jobs against a broken venv.
+ */
+export async function runUpgrade(deps: UpgradeDeps): Promise<number> {
+  const npm = deps.installCode();
+  if (npm.error !== undefined) {
+    err.write(`could not run npm: ${npm.error}\n`);
     return 1;
   }
-  if (child.status !== 0) return child.status ?? 1;
+  if (npm.code !== 0) return npm.code;
+
+  const cfg = deps.config();
+  if (cfg === null) return 1;
+
+  out.write("\nRe-installing Python dependencies into the venv…\n");
+  const steps = deps.bootstrapPython(cfg, {
+    onStep: (r) => out.write(`  ${r.ok ? "✓" : "✗"} ${r.step}: ${r.detail}\n`),
+  });
+  if (steps.some((step) => !step.ok)) {
+    // `onStep` already printed the failing step's detail; stopping here keeps
+    // the jobs from being re-armed against a venv the upgrade left stale.
+    err.write("upgrade aborted: the Python install failed, jobs were not touched\n");
+    return 1;
+  }
 
   // The plists point at the old package path, so they have to be rewritten
   // before the upgraded engine is what launchd actually runs.
   out.write("\nRefreshing launchd jobs so they point at the new install…\n");
-  return cmdInstallJobs();
+  const home = configHome();
+  let failed = 0;
+  for (const job of JOB_KEYS) {
+    if (!cfg.jobs[job]) {
+      out.write(`  ${job}: disabled in config, skipped\n`);
+      continue;
+    }
+    const result = deps.installJob(job, cfg, home);
+    out.write(`${result.loaded ? "✔" : "✘"} ${job}: ${result.message}\n`);
+    if (!result.loaded) failed += 1;
+  }
+  return failed === 0 ? 0 : 1;
 }
 
 // ── dispatch ──────────────────────────────────────────────────────────
@@ -269,7 +347,7 @@ export async function main(argv: string[]): Promise<number> {
     case "status":
       return cmdStatus();
     case "upgrade":
-      return cmdUpgrade();
+      return await runUpgrade(defaultUpgradeDeps);
     case "help":
       out.write(usage(version));
       return 0;

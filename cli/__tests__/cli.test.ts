@@ -9,8 +9,15 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { COMMANDS, parseArgv, usage } from "../index.js";
+
+// dist-test/__tests__/cli.test.js → repo root is two levels up.
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 const EXPECTED_NAMES = [
   "init",
@@ -131,4 +138,26 @@ test("parseArgv keeps arguments that look like the command itself", () => {
     cmd: "start",
     rest: ["monitor"],
   });
+});
+
+test("the built dist/index.js answers `help` with exit 0", () => {
+  // `help` only prints — it spawns nothing and reads nothing but package.json,
+  // so running the real entry point here cannot touch the machine.
+  const entry = join(ROOT, "dist", "index.js");
+  if (!existsSync(entry)) {
+    // Keep `npm test` self-sufficient: build once with the local tsc. No
+    // network, no npm — just the devDependency compiler already installed.
+    const tsc = join(ROOT, "node_modules", "typescript", "bin", "tsc");
+    const built = spawnSync(process.execPath, [tsc, "-p", "tsconfig.json"], {
+      cwd: ROOT,
+      encoding: "utf8",
+    });
+    assert.equal(built.status, 0, `${built.stdout ?? ""}${built.stderr ?? ""}`);
+  }
+  const res = spawnSync(process.execPath, [entry, "help"], {
+    cwd: ROOT,
+    encoding: "utf8",
+  });
+  assert.equal(res.status, 0, res.stderr);
+  assert.ok(res.stdout.includes("Usage:"), res.stdout);
 });

@@ -17,7 +17,7 @@
  *   printed credential is a leaked credential the moment the terminal is
  *   scrolled, recorded, or piped into a log.
  * - **Required values are asked for, never guessed.** `mode`, `projectDir`,
- *   `pythonPath` and `signalDir` carry no defaults in the schema, so the flow
+ *   `stateDir`, `pythonPath` and `signalDir` carry no defaults in the schema, so the flow
  *   collects each one and hands the result to `parseConfig` before saving. An
  *   invalid config is reported and dropped rather than written, since a file
  *   that parses only halfway turns a setup mistake into a launchd job that
@@ -143,6 +143,9 @@ function pad2(n: number): string {
 /** Human-readable form of a job's schedule, for the install question. */
 function scheduleSummary(job: JobKey): string {
   const schedule = JOBS[job].schedule;
+  // A keepAlive job has no schedule to summarise — launchd keeps it running,
+  // so the user is agreeing to a daemon, not a clock time.
+  if ("keepAlive" in schedule) return "always on";
   if ("intervalSec" in schedule) return `every ${schedule.intervalSec}s`;
   // A job may run at several fixed times per weekday (`signalUs`: 22:35 and
   // 23:35). Listing every one matters here — this string is what the user reads
@@ -327,8 +330,8 @@ export async function runInit(opts: {
   }
   const llmAgent = await choose<Agent>("Default agent", found, found[0], io);
 
-  // ── 5/8 ─ Python + signal directory ─────────────────────────────────
-  section(5, "Python + signal directory");
+  // ── 5/8 ─ Python + directories ──────────────────────────────────────
+  section(5, "Python + directories");
   const pythonPath = deps.findPython();
   if (pythonPath === null) {
     fail("No supported Python interpreter found.");
@@ -336,9 +339,20 @@ export async function runInit(opts: {
     return 1;
   }
   ok(`python: ${pythonPath}`);
+  // The state root outlives upgrades — `npm i -g` replaces `projectDir`
+  // wholesale, so the venv, database and signals must live elsewhere. The
+  // default is the same state home the config file itself lives in
+  // (`configHome()` at the call site).
+  const stateDir = await askDefaultValidated(
+    "State directory (venv, trade database, logs)",
+    opts.home,
+    validators.absolutePath,
+    io,
+  );
+  ok(`state: ${stateDir}`);
   const signalDir = await askDefaultValidated(
     "Signal directory (signal pipeline output)",
-    defaultSignalDir(opts.projectDir),
+    defaultSignalDir(stateDir),
     validators.absolutePath,
     io,
   );
@@ -414,6 +428,7 @@ export async function runInit(opts: {
   const parsed = parseConfig({
     mode,
     projectDir: opts.projectDir,
+    stateDir,
     pythonPath,
     signalDir,
     llmAgent,

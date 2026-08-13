@@ -156,8 +156,8 @@ kis-trader doctor
 
 ### Jobs
 
-`start`, `logs`, `install-jobs` 가 다루는 잡은 다음 7개다. 앞의 둘이 신호를
-만들고, 나머지 다섯이 진입·감시·정산을 맡는다.
+`start`, `logs`, `install-jobs` 가 다루는 잡은 다음 9개다. 앞의 둘이 신호를
+만들고, 나머지 일곱이 진입·재배치·감시·정산을 맡는다.
 
 | 잡 이름 | 실행 | 스케줄 | 로그 파일 |
 |---------|------|--------|-----------|
@@ -167,18 +167,36 @@ kis-trader doctor
 | `monitor` | `src.monitor` | **300초마다 (요일 무관)** | `monitor.log` |
 | `reconciler` | `src.reconciler` | 월~금 16:00 | `reconciler.log` |
 | `dipBuy` | `src.orchestrator --dip-only` | 월~금 15:00 | `dipBuy.log` |
+| `cashDeploy` | `src.orchestrator --deploy-cash` | 월~금 09:30~15:00, 30분 간격 (12회) | `cashDeploy.log` |
 | `usOrchestrator` | `src.orchestrator --asset-class overseas_stock` | 월~금 22:45 | `usOrchestrator.log` |
+| `telegramAgent` | `src.agent.telegram_agent` | **상시 (KeepAlive)** | `telegramAgent.log` |
+
+`telegramAgent` 만 스케줄이 없는 **상주 잡**이다. 텔레그램으로 `/balance`,
+`/positions`, `/status`, `/buyable`, `/history`, `/buy`, `/sell`, `/mode` 를
+받아 대화형으로 조회·주문한다. 주문은 인라인 버튼 확인을 거쳐야 실행된다.
+죽으면 launchd 가 30초 간격으로 다시 띄운다.
 
 시각 지정 잡은 launchd `StartCalendarInterval` 로 월~금만 돌지만, `monitor` 는
 `StartInterval` 방식이라 **주말·공휴일에도 300초마다 기동한다** (장이 닫혀 있으면
 할 일이 없어 그대로 종료된다).
 
-국내 진입을 내는 잡은 `orchestrator` 하나뿐이고 09:05 에 `--carry-over` 로 돈다.
-**오늘 신호는 16:30 에야 만들어지므로, 장 시작 시점에는 가장 최근(전 영업일)
-신호로 진입한다.** 신호가 며칠씩 묵었으면 경고를 보낸다.
+국내 진입을 내는 잡은 `orchestrator` 와 `cashDeploy` 둘이다. `orchestrator` 는
+09:05 에 `--carry-over` 로 돈다. **오늘 신호는 16:30 에야 만들어지므로, 장 시작
+시점에는 가장 최근(전 영업일) 신호로 진입한다.** 신호가 며칠씩 묵었으면 경고를
+보낸다.
 
-신호 잡 두 개만 겹침 가드가 붙어 있다 — 260 거래일 조회는 분 단위로 걸릴 수 있어
-다음 스케줄과 겹칠 수 있는 반면, 트레이더 잡은 짧고 이미 멱등이다.
+`cashDeploy` 는 청산으로 회수된 현금을 같은 날 다시 투입한다 — 아침 진입
+(`guardrails.max_daily_entries`)과는 별도로 `cash_deploy.max_daily_entries`
+(6건) 상한을 쓰고, `cash_deploy.enabled` 로 켜고 끌 수 있다. 틱당 LLM 평가
+후보는 `cash_deploy.max_candidates_per_run`(4개)로 제한한다 — 최악
+4×180초=12분이 락 만료 15분보다 짧아야 스케줄 간격 30분 안에서 안전하다.
+미달분이 `cash_deploy.min_deploy_won`(50만원)보다 작으면 잔돈 주문을 내지
+않고, 가동률이 `cash_deploy.underrun_warn_pct`(70%) 아래면 하루 한 번만
+경고한다.
+
+신호 잡 두 개와 `cashDeploy` 는 겹침 가드가 붙어 있다 — 260 거래일 조회는 분
+단위로 걸릴 수 있고, `cashDeploy` 는 30분 간격이라 이전 실행이 아직 안 끝났을
+수 있는 반면, 나머지 트레이더 잡은 짧고 이미 멱등이다.
 
 ```bash
 kis-trader status                # 잡별 launchd 상태
@@ -253,6 +271,16 @@ LLM 의 판단은 이 값들로 clamp 되며, 여기에 들어 있는 것이 사
   동시 보유 종목 수, 일일 신규 진입 수, 최소 신뢰도, 거래당 리스크 비율
 - `kill_switch` — 일일/주간 손실률 한도, 연속 손절 횟수, LLM 파싱 실패율 한도
 - `take_profit_partial` — 1차 익절 도달 시 부분 매도 + 본전 손절 상향
+- `capital` — 사이징 기준(총자산 대비 목표 가동률)과 현금 버퍼
+- `cash_deploy` — 장중 현금 재배치 잡(`cashDeploy`) 전용 파라미터
+
+사이징 기준은 예수금이 아니라 **총자산**(KIS `tot_evlu_amt`)이다.
+`capital.target_utilization_pct`(90%)를 목표로 투자 비중을 유지하고,
+`capital.cash_buffer_pct`(10%)는 주문 거부·수수료·부분체결에 대비해 항상
+현금으로 남긴다. 실제 발주 금액은 이 목표와 별개로 매수여력(`ord_psbl_cash`)을
+넘지 않도록 다시 clamp된다. **진입 후보가 부족하면 목표 가동률에 못 미칠 수
+있고, 그럴 때는 억지로 채우지 않고 경고만 보낸다** — 후보 품질을 낮춰서까지
+채우지 않기로 한 명시적인 트레이드오프다.
 
 **`real` 전환 전에 이 파일을 직접 열어 값을 확인하고 자기 계좌 규모에 맞게 조정할 것.**
 현재 커밋된 값은 특정 시드 규모를 전제로 조정된 "공격적" 프리셋이며, 그대로가
@@ -266,10 +294,26 @@ LLM 의 판단은 이 값들로 clamp 되며, 여기에 들어 있는 것이 사
 
 | 경로 | 내용 |
 |------|------|
-| `~/.kis-trader/config.json` | 모드, 프로젝트 경로, 파이썬 경로, 신호 디렉토리, LLM 에이전트, 잡 on/off. **퍼미션 0600 으로 저장된다** |
+**사용자가 잃으면 곤란한 것은 전부 이 아래에 있다.** 패키지 설치 디렉토리에는
+코드만 들어간다.
+
+| 경로 | 내용 |
+|------|------|
+| `~/.kis-trader/config.json` | 모드, 상태 디렉토리, 코드 경로, 파이썬 경로, 신호 디렉토리, LLM 에이전트, 잡 on/off. **퍼미션 0600 으로 저장된다** |
+| `~/.kis-trader/.venv/bin/python` | 엔진이 실제로 실행되는 인터프리터. 코드는 여기에 editable 로 설치된다 |
+| `~/.kis-trader/data/trades.sqlite` | 체결·포지션·PnL 영속 데이터 |
+| `~/.kis-trader/data/signals/` | 신호 잡이 쓰고 트레이더 잡이 읽는 JSON (`signalDir` 기본값) |
 | `~/.kis-trader/logs/` | 잡별 `<job>.log` (stdout) 와 `<job>.err.log` (stderr) |
+| `~/.kis-trader/locks/` | 신호 잡의 중복 실행 방지 락 |
 
 `config.json` 에는 **비밀값이 하나도 들어 있지 않다.**
+
+#### 왜 상태가 패키지 밖에 있나
+
+npm 은 업그레이드할 때 패키지 디렉토리를 통째로 교체한다. 그 안에 쓴 것은 무엇이든
+지워진다 — 거래 이력도, venv 도. 그래서 상태는 처음부터 패키지 밖에 두고, 패키지에는
+코드만 남긴다. `doctor` 는 `stateDir` 이 코드 디렉토리 안쪽에 있으면 **fail** 로
+잡는다.
 
 ### macOS 로그인 키체인
 
@@ -299,19 +343,22 @@ plist 안에 명시적으로 선언되어 들어간다 (launchd 는 셸 rc 파�
 
 ### 패키지 설치 디렉토리
 
-venv 와 SQLite DB 는 npm 이 설치한 패키지 루트 아래에 만들어진다.
+**코드만 들어 있다.** 런타임 산출물은 하나도 여기에 쓰이지 않는다 (위의 상태
+디렉토리 참고). npm 이 업그레이드 때 이 디렉토리를 교체해도 잃을 것이 없다는 뜻이다.
 
-| 경로 | 내용 |
-|------|------|
-| `<패키지 루트>/.venv/bin/python` | 엔진이 실제로 실행되는 인터프리터 |
-| `<패키지 루트>/data/trades.sqlite` | 체결·포지션·PnL 영속 데이터 |
-| `<패키지 루트>/data/signals/` | 신호 잡이 쓰고 트레이더 잡이 읽는 JSON (`signalDir` 기본값) |
+### `upgrade` 가 하는 일
 
-`data/` 아래 산출물은 **배포 패키지에 들어 있지 않다.** 신호 JSON 도 SQLite DB 도
-설치된 맥에서 실행 시점에 생성된다.
+세 단계를 **이 순서로** 수행한다.
 
-`upgrade` 는 `npm install -g @younggichoi/kis-trader@latest` 를 돌린 뒤,
-plist 가 가리키는 경로가 낡지 않도록 **잡을 자동으로 다시 설치**한다.
+1. `npm install -g @younggichoi/kis-trader@latest` — 코드를 교체
+2. **파이썬 의존성 재설치** — 새 릴리스가 구 릴리스에 없던 의존성을 선언했을 수
+   있다. 이 단계를 건너뛰면 새 코드가 낡은 의존성 집합을 만나 첫 신규 import 에서
+   죽는다 (0.1.0→0.2.0 에서 `No module named 'pandas'` 로 실제 발생했다)
+3. 잡 재설치 — plist 가 가리키는 경로가 낡지 않도록
+
+잡이 **마지막**인 것이 중요하다. 2단계가 실패하면 `upgrade` 는 non-zero 로 멈추고
+잡을 건드리지 않는다. 낡은 잡이 계속 도는 편이, 망가진 venv 를 가리키는 새 잡이
+무장되는 것보다 안전하기 때문이다.
 
 ---
 

@@ -70,9 +70,15 @@ const DETAIL_MAX_LEN = 400;
  */
 const ALREADY_APPLIED_MARKERS = ["already exists", "duplicate column"];
 
-/** Absolute path of the interpreter inside the project's virtualenv. */
-export function venvPython(projectDir: string): string {
-  return join(projectDir, ".venv", "bin", "python");
+/**
+ * Absolute path of the interpreter inside the virtualenv.
+ *
+ * The argument is the **state** root. The venv used to sit inside the installed
+ * package directory, which `npm i -g` replaces wholesale — so an upgrade
+ * deleted the entire dependency set. Under the state root it survives.
+ */
+export function venvPython(stateDir: string): string {
+  return join(stateDir, ".venv", "bin", "python");
 }
 
 /**
@@ -154,14 +160,16 @@ export function bootstrapPython(cfg: Config, opts: BootstrapOptions = {}): StepR
     return ok;
   };
 
-  const py = venvPython(cfg.projectDir);
+  const py = venvPython(cfg.stateDir);
 
   // 1. venv — an existing interpreter is reused. Rebuilding one would discard
-  //    an already-installed dependency set for no gain.
+  //    an already-installed dependency set for no gain. Only the state root's
+  //    venv counts: one left at the old `<projectDir>/.venv` path is inside the
+  //    directory an upgrade replaces, so adopting it would reintroduce the bug.
   if (isExecutableFile(py)) {
     if (!emit("venv", true, "already exists")) return results;
   } else {
-    const r = run(cfg.pythonPath, ["-m", "venv", join(cfg.projectDir, ".venv")], VENV_TIMEOUT_MS);
+    const r = run(cfg.pythonPath, ["-m", "venv", join(cfg.stateDir, ".venv")], VENV_TIMEOUT_MS);
     if (!emit("venv", r.code === 0, r.code === 0 ? "created" : failure(r.code, r.out))) {
       return results;
     }
@@ -176,18 +184,26 @@ export function bootstrapPython(cfg: Config, opts: BootstrapOptions = {}): StepR
     }
   }
 
-  // 3. deps — `.[dev]` is relative to the project, so this one runs from there.
+  // 3. deps — an **editable** install of the code, from the venv that lives
+  //    under the state root. The target is spelled absolutely rather than as
+  //    `.[dev]` because the process runs out of `stateDir`, where there is no
+  //    pyproject.toml. Editable is what makes the pairing survive an upgrade:
+  //    the venv records `projectDir` as the import path, so a package directory
+  //    replaced in place is picked up without reinstalling anything.
   {
-    const r = run(py, ["-m", "pip", "install", "-e", ".[dev]", "-q"], DEPS_TIMEOUT_MS, {
-      cwd: cfg.projectDir,
-    });
+    const r = run(
+      py,
+      ["-m", "pip", "install", "-e", `${cfg.projectDir}[dev]`, "-q"],
+      DEPS_TIMEOUT_MS,
+      { cwd: cfg.stateDir },
+    );
     if (!emit("deps", r.code === 0, r.code === 0 ? "installed" : failure(r.code, r.out))) {
       return results;
     }
   }
 
-  // 4. migrations
-  const dataDir = join(cfg.projectDir, "data");
+  // 4. migrations — the database is state, so it lives under `stateDir`…
+  const dataDir = join(cfg.stateDir, "data");
   try {
     mkdirSync(dataDir, { recursive: true });
   } catch (err) {
@@ -195,7 +211,8 @@ export function bootstrapPython(cfg: Config, opts: BootstrapOptions = {}): StepR
     return results;
   }
 
-  const migrationsDir = join(dataDir, "migrations");
+  // …while the `.sql` files are code, and ship with the package.
+  const migrationsDir = join(cfg.projectDir, "data", "migrations");
   let files: string[];
   try {
     files = readdirSync(migrationsDir, { withFileTypes: true })
@@ -241,13 +258,17 @@ export function bootstrapPython(cfg: Config, opts: BootstrapOptions = {}): StepR
 }
 
 /**
- * True when the project has both halves of a bootstrap: a usable venv
+ * True when the state root has both halves of a bootstrap: a usable venv
  * interpreter and the database. Either alone means an interrupted setup, which
  * the caller should finish rather than skip.
+ *
+ * Both checks look under `stateDir` only. An install from before the state-root
+ * move has both artefacts under `projectDir`, and reporting that as
+ * bootstrapped would skip the very step that relocates them.
  */
 export function isBootstrapped(cfg: Config): boolean {
   return (
-    isExecutableFile(venvPython(cfg.projectDir)) &&
-    existsSync(join(cfg.projectDir, "data", "trades.sqlite"))
+    isExecutableFile(venvPython(cfg.stateDir)) &&
+    existsSync(join(cfg.stateDir, "data", "trades.sqlite"))
   );
 }

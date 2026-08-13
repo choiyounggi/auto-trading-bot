@@ -32,6 +32,7 @@ import { venvPython } from "../bootstrap.js";
  */
 
 const PROJECT = "/Users/tester/project";
+const STATE = "/Users/tester/state";
 const SIGNAL_DIR = "/Users/tester/signals";
 const PYTHON = "/opt/homebrew/bin/python3.12";
 
@@ -43,6 +44,7 @@ function cfg(over: Partial<Config> = {}): Config {
   return {
     mode: "paper",
     projectDir: PROJECT,
+    stateDir: STATE,
     pythonPath: PYTHON,
     signalDir: SIGNAL_DIR,
     llmAgent: "claude",
@@ -52,9 +54,11 @@ function cfg(over: Partial<Config> = {}): Config {
       monitor: true,
       reconciler: true,
       dipBuy: true,
+      cashDeploy: true,
       usOrchestrator: true,
     signalKr: true,
     signalUs: true,
+      telegramAgent: true,
     },
     ...over,
   };
@@ -139,6 +143,7 @@ test("all-healthy stubs: every check passes and the exit code is 0", () => {
     checks.map((c) => c.name),
     [
       "config",
+      "state-dir",
       "python",
       "venv",
       "database",
@@ -259,11 +264,11 @@ test("an interpreter that does not answer fails the python check", () => {
 
 test("a missing venv interpreter fails the venv check", () => {
   const checks = runDoctor(
-    healthy({ isExecutableFile: (p) => p !== venvPython(PROJECT) }),
+    healthy({ isExecutableFile: (p) => p !== venvPython(STATE) }),
   );
   const venv = get(checks, "venv");
   assert.equal(venv.status, "fail");
-  assert.ok(venv.detail.includes(venvPython(PROJECT)));
+  assert.ok(venv.detail.includes(venvPython(STATE)));
   assert.equal(venv.hint, "run: kis-trader init");
 });
 
@@ -279,9 +284,68 @@ test("a missing database file fails the database check", () => {
   );
   const db = get(checks, "database");
   assert.equal(db.status, "fail");
-  assert.deepEqual(seen, [`${PROJECT}/data/trades.sqlite`]);
+  // `fileExists` also backs the state-dir check, so it sees the state root first.
+  assert.deepEqual(seen, [STATE, `${STATE}/data/trades.sqlite`]);
   assert.ok(db.detail.includes("trades.sqlite"));
   assert.ok(db.hint);
+});
+
+test("the venv and database checks probe under cfg.stateDir, not projectDir", () => {
+  const probedExec: string[] = [];
+  const probedFiles: string[] = [];
+  const checks = runDoctor(
+    healthy({
+      isExecutableFile: (p) => {
+        probedExec.push(p);
+        return true;
+      },
+      fileExists: (p) => {
+        probedFiles.push(p);
+        return true;
+      },
+    }),
+  );
+
+  assert.equal(get(checks, "venv").detail, venvPython(STATE));
+  assert.ok(probedExec.includes(venvPython(STATE)), probedExec.join(","));
+  assert.ok(probedFiles.includes(`${STATE}/data/trades.sqlite`), probedFiles.join(","));
+  assert.ok(!probedExec.includes(venvPython(PROJECT)), "the venv must not live in the upgrade-replaced project dir");
+  assert.ok(!probedFiles.includes(`${PROJECT}/data/trades.sqlite`), "the database must not live in the upgrade-replaced project dir");
+});
+
+// ------------------------------------------------------------------ state-dir
+
+test("a missing state directory fails with the init hint", () => {
+  const checks = runDoctor(healthy({ fileExists: (p) => p !== STATE }));
+  const state = get(checks, "state-dir");
+  assert.equal(state.status, "fail");
+  assert.ok(state.detail.includes(STATE), state.detail);
+  assert.equal(state.hint, "run: kis-trader init");
+  assert.equal(exitCodeFor(checks), 1);
+});
+
+test("a stateDir inside projectDir fails and names the upgrade hazard", () => {
+  const checks = runDoctor(healthy({}, cfg({ stateDir: `${PROJECT}/state` })));
+  const state = get(checks, "state-dir");
+  assert.equal(state.status, "fail");
+  assert.ok(/upgrade/i.test(state.hint ?? ""), state.hint);
+  assert.equal(exitCodeFor(checks), 1);
+});
+
+test("a stateDir equal to projectDir itself is also the upgrade hazard", () => {
+  const checks = runDoctor(healthy({}, cfg({ stateDir: PROJECT })));
+  const state = get(checks, "state-dir");
+  assert.equal(state.status, "fail");
+  assert.ok(/upgrade/i.test(state.hint ?? ""), state.hint);
+});
+
+test("a sibling directory that only shares the projectDir prefix passes", () => {
+  // `/Users/tester/project-state` starts with `/Users/tester/project` as a
+  // string but is not inside it — a naive startsWith would fail it wrongly.
+  const checks = runDoctor(healthy({}, cfg({ stateDir: `${PROJECT}-state` })));
+  const state = get(checks, "state-dir");
+  assert.equal(state.status, "pass", state.detail);
+  assert.equal(exitCodeFor(checks), 0);
 });
 
 // -------------------------------------------------------------------- keychain
@@ -661,7 +725,7 @@ test("a probe reporting ok:true passes and shows the masked account", () => {
 
   assert.equal(probe.calls.length, 1);
   const call = probe.calls[0];
-  assert.equal(call.command, venvPython(PROJECT));
+  assert.equal(call.command, venvPython(STATE));
   assert.deepEqual(call.args, ["-m", "src.broker.probe"]);
   assert.equal(call.opts.cwd, PROJECT);
   assert.equal(call.opts.timeoutMs, 15_000);
@@ -783,7 +847,7 @@ test("a failed venv check skips the probe entirely", () => {
   const probe = recordingProbe();
   const checks = runDoctor(
     healthy({
-      isExecutableFile: (p) => p !== venvPython(PROJECT),
+      isExecutableFile: (p) => p !== venvPython(STATE),
       runProbe: probe.run,
     }),
   );
@@ -817,9 +881,11 @@ test("a disabled job that is absent is only a warn", () => {
           monitor: true,
           reconciler: true,
           dipBuy: false,
+          cashDeploy: true,
           usOrchestrator: true,
     signalKr: true,
     signalUs: true,
+          telegramAgent: true,
         },
       }),
     ),
@@ -856,13 +922,14 @@ test("every job key gets its own check", () => {
   );
 });
 
-test("the job loop covers all seven jobs, including the two signal jobs", () => {
+test("the job loop covers all nine jobs, including the telegram agent", () => {
   const checks = runDoctor(healthy());
   const names = checks.filter((c) => c.name.startsWith("job:")).map((c) => c.name);
-  assert.equal(JOB_KEYS.length, 7);
-  assert.equal(names.length, 7);
+  assert.equal(JOB_KEYS.length, 9);
+  assert.equal(names.length, 9);
   assert.ok(names.includes("job:signalKr"), names.join(","));
   assert.ok(names.includes("job:signalUs"), names.join(","));
+  assert.ok(names.includes("job:telegramAgent"), names.join(","));
 });
 
 test("an enabled signal job that is absent fails, a disabled one only warns", () => {

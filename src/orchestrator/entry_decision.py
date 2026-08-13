@@ -36,6 +36,14 @@ class AccountSnapshot:
     daily_pnl_pct: float
     daily_entries_today: int
     cash_usd: float = 0.0
+    total_asset_won: int = 0        # 0 이면 cash_won 으로 폴백
+    invested_won: int = 0
+    pending_notional_won: int = 0
+
+    @property
+    def sizing_base_won(self) -> int:
+        """국내 사이징 기준. total_asset_won 미배선 호출자는 기존 동작(예수금)을 유지."""
+        return self.total_asset_won or self.cash_won
 
 
 @dataclass
@@ -114,7 +122,10 @@ def _effective_entry_rules(candidate: dict, features: dict, rules: TradingRules)
     ), True, meta, strategy_id
 
 
-def build_prompt(candidate: dict, signals: dict, account: AccountSnapshot, rules: TradingRules) -> str:
+def build_prompt(
+    candidate: dict, signals: dict, account: AccountSnapshot, rules: TradingRules,
+    *, deployable_won: int = 0,
+) -> str:
     panel = candidate.get("panel_summary") or {}
     panel_block = (
         f"종가 {panel.get('last_close', 0):,}, 등락률 {panel.get('d_change_pct', 0):+.2f}%, "
@@ -196,7 +207,11 @@ def build_prompt(candidate: dict, signals: dict, account: AccountSnapshot, rules
         short_block=short_block,
         macro_block=macro_block,
         news_block=news_block,
-        cash_won=account.cash_won,
+        total_asset_won=account.sizing_base_won,
+        invested_won=account.invested_won,
+        utilization_pct=(account.invested_won / account.sizing_base_won * 100) if account.sizing_base_won else 0.0,
+        target_utilization_pct=rules.target_utilization_pct,
+        deployable_won=deployable_won,
         open_positions=account.open_positions,
         max_positions=rules.max_position_count,
         daily_pnl_pct=account.daily_pnl_pct,
@@ -255,6 +270,8 @@ def evaluate_candidate(
     account: AccountSnapshot,
     rules: TradingRules,
     repo: Repo | None = None,
+    *,
+    budget_won: int | None = None,
 ) -> tuple[EntryPlan | None, str | None]:
     """단일 후보 평가. (EntryPlan, None) 또는 (None, skip_reason)."""
 
@@ -263,7 +280,7 @@ def evaluate_candidate(
         return None, f"signal score {candidate.get('score')} < {rules.entry_signal_score_min}"
 
     # 2. LLM 결정 (self-consistency 3회)
-    prompt = build_prompt(candidate, signals, account, rules)
+    prompt = build_prompt(candidate, signals, account, rules, deployable_won=budget_won or 0)
     decision, trace = vote_entry(prompt, n=rules.entry_self_consistency, timeout=rules.timeout_sec_entry)
 
     if decision.action == "SKIP":
@@ -339,7 +356,7 @@ def evaluate_candidate(
         entry_price = round_to_tick(clamped.entry_price, mode="floor")  # 매수 보수
         stop_loss = calc_stop_loss_price(entry_price, clamped.stop_loss_pct)
         take_profit = calc_take_profit_price(entry_price, clamped.take_profit_pct)
-        capital = account.cash_won
+        capital = account.sizing_base_won      # ← account.cash_won 에서 변경
         size_pct = float(clamped.size_pct or 0.0)
         risk_pct = float(rules.risk_per_trade_pct)
 
@@ -350,10 +367,14 @@ def evaluate_candidate(
     if is_probe and size_qty <= 0 and risk_qty >= 1 and entry_price <= capital:
         size_qty = 1
     qty = min(size_qty, risk_qty) if risk_qty > 0 else size_qty
+    if budget_won is not None:
+        budget_qty = budget_won // entry_price if entry_price > 0 else 0
+        qty = min(qty, budget_qty)
     if qty <= 0:
         return None, (
             f"qty=0 (price={entry_price}, capital={capital}, "
-            f"size_pct={size_pct}, risk_per_trade_pct={risk_pct}, asset_class={meta['asset_class']})"
+            f"size_pct={size_pct}, risk_per_trade_pct={risk_pct}, asset_class={meta['asset_class']}, "
+            f"budget_won={budget_won})"
         )
 
     return EntryPlan(
@@ -384,6 +405,9 @@ def select_entries(
     rules: TradingRules,
     kill_switch_file: str | None = None,
     repo: Repo | None = None,
+    *,
+    deployable_won: int | None = None,
+    quota_override: int | None = None,
 ) -> tuple[list[EntryPlan], list[SkipReason]]:
     """전체 후보 → 진입 계획 + 거부 사유."""
     candidates = list(candidates)
@@ -411,8 +435,10 @@ def select_entries(
         if not candidates:
             return [], initial_skips
 
-    # 2. 일일 진입 한도
-    if account.daily_entries_today >= rules.max_daily_entries:
+    # 2. 일일 진입 한도 — quota_override 가 있으면 그 유효 상한을 게이트도 함께 본다
+    # (D9a: 게이트와 quota 계산이 다른 상한을 쓰면 quota_override 가 무력화된다).
+    effective_max_entries = quota_override if quota_override is not None else rules.max_daily_entries
+    if account.daily_entries_today >= effective_max_entries:
         return [], [SkipReason(c["ticker"], c["name"], "daily_entry_limit") for c in candidates]
 
     # 3. 보유 종목 한도
@@ -422,14 +448,16 @@ def select_entries(
     # 4. 후보별 LLM 평가
     plans: list[EntryPlan] = []
     skips: list[SkipReason] = list(initial_skips)
-    quota = rules.max_daily_entries - account.daily_entries_today
+    quota = effective_max_entries - account.daily_entries_today
 
     selected_tickers: set[str] = set()
     strategy_counts: dict[str, int] = {}
     per_strategy_limit = getattr(rules, "strategy_max_daily_entries", {}) or {}
+    remaining = deployable_won
 
     for c in sorted(candidates, key=lambda x: -x.get("score", 0)):
         strategy_id = c.get("strategy_id") or "flow_momentum"
+        is_overseas = _is_overseas_candidate(c)
         if len(plans) >= quota:
             skips.append(SkipReason(c["ticker"], c["name"], "quota_exhausted"))
             continue
@@ -439,11 +467,18 @@ def select_entries(
         if strategy_counts.get(strategy_id, 0) >= int(per_strategy_limit.get(strategy_id, 1)):
             skips.append(SkipReason(c["ticker"], c["name"], f"strategy_daily_limit:{strategy_id}"))
             continue
-        plan, reason = evaluate_candidate(c, signals, account, rules, repo=repo)
+        # 해외 후보에는 원화 배치 예산을 적용하지 않는다 (원화 예산 ≠ USD 예산)
+        if not is_overseas and remaining is not None and remaining <= 0:
+            skips.append(SkipReason(c["ticker"], c["name"], "budget_exhausted"))
+            continue
+        candidate_budget = None if is_overseas else remaining
+        plan, reason = evaluate_candidate(c, signals, account, rules, repo=repo, budget_won=candidate_budget)
         if plan:
             plans.append(plan)
             selected_tickers.add(plan.ticker)
             strategy_counts[strategy_id] = strategy_counts.get(strategy_id, 0) + 1
+            if not is_overseas and remaining is not None:
+                remaining -= plan.entry_price_tick * plan.qty
         else:
             skips.append(SkipReason(c["ticker"], c["name"], reason or "unknown"))
 

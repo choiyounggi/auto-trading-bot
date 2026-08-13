@@ -155,6 +155,7 @@ class Telegram:
             {"command": "positions", "description": "보유 포지션 상세"},
             {"command": "status", "description": "계좌 현황 요약"},
             {"command": "buyable", "description": "해외 매수가능금액 조회"},
+            {"command": "history", "description": "거래 내역 (최근 N건 + 손익 요약)"},
             {"command": "mode", "description": "paper/real 모드 전환·확인"},
             {"command": "buy", "description": "매수: /buy <코드> <수량>"},
             {"command": "sell", "description": "매도: /sell <코드> <수량>"},
@@ -231,6 +232,51 @@ def _positions_text(dom, ov) -> str:
     return "\n".join(lines)
 
 
+_TELEGRAM_MSG_LIMIT = 4096
+
+
+def _history_text(trades, summary) -> str:
+    """종목명 길이는 자유 변수라 행 수 clamp만으로는 4096자 제한을 보장할 수 없다.
+    그래서 렌더 길이로 예산을 잡고, 넘칠 다음 항목에서 멈춘 뒤 몇 건이 잘렸는지
+    안내한다. 요약 블록(summary)은 항상 clamp된 전체 구간 기준이며 절대 자르지 않는다."""
+    if not trades:
+        return "*📜 거래 내역*\n청산된 거래가 아직 없어."
+
+    footer = "\n".join(
+        [
+            "─────",
+            f"{summary.trades}건 · 승 {summary.wins} / 패 {summary.losses} "
+            f"(승률 {summary.win_rate_pct:.1f}%)",
+            f"누적손익 *{summary.total_pnl_won:+,}원*",
+        ]
+    )
+    header = f"*📜 거래 내역* (최근 {len(trades)}건)"
+
+    body: list[str] = []
+    shown = 0
+    for t in trades:
+        date_str = t.exit_at.strftime("%m/%d") if t.exit_at else "-"
+        reason = t.exit_reason.lower().replace("_", "-") if t.exit_reason else "-"
+        entry = (
+            f"`{t.ticker}` {t.name} {t.qty}주\n"
+            f"  {t.entry_price:,} → {t.exit_price:,}  {t.pnl_won:+,}원 "
+            f"({t.pnl_pct:+.2f}%)  {reason}  {date_str}"
+        )
+        remaining_after = len(trades) - shown - 1
+        notice = f"… 외 {remaining_after}건 (길이 제한)" if remaining_after > 0 else None
+        candidate = [header, *body, entry, *([notice] if notice else []), footer]
+        if len("\n".join(candidate)) > _TELEGRAM_MSG_LIMIT:
+            break
+        body.append(entry)
+        shown += 1
+
+    parts = [header, *body]
+    if shown < len(trades):
+        parts.append(f"… 외 {len(trades) - shown}건 (길이 제한)")
+    parts.append(footer)
+    return "\n".join(parts)
+
+
 # ── 에이전트 ────────────────────────────────────────────────
 class Agent:
     def __init__(self, tg: Telegram):
@@ -266,6 +312,7 @@ class Agent:
             self.tg.send(
                 "*🤖 트레이딩 에이전트*\n"
                 "/balance 잔고 · /positions 포지션 · /status 현황 · /buyable 해외매수가능\n"
+                "/history [N] 거래 내역 (기본 10건, 최대 50)\n"
                 "/buy <코드> <수량> · /sell <코드> <수량>\n"
                 "/mode paper|real 모드 전환 (현재: *" + self.mode.upper() + "*)\n"
                 "또는 그냥 질문/지시를 자연어로 보내면 분석·제안해줘.\n"
@@ -280,6 +327,8 @@ class Agent:
             self._cmd_status(); return
         if low in ("/buyable", "/매수가능", "매수가능"):
             self._cmd_buyable(); return
+        if low.startswith("/history") or low.startswith("/내역") or low == "내역":
+            self._cmd_history(text); return
         if low.startswith("/mode") or low.startswith("모드"):
             self._cmd_mode(text); return
         if low.startswith("/buy") or low.startswith("/sell"):
@@ -343,6 +392,23 @@ class Agent:
             )
         except Exception as e:
             self.tg.send(f"⚠️ 매수가능 조회 실패: {e}")
+
+    def _cmd_history(self, text: str) -> None:
+        parts = text.split()
+        limit = 10
+        if len(parts) > 1:
+            try:
+                limit = int(parts[1])
+            except ValueError:
+                self.tg.send("형식: `/history` 또는 `/history 20` (최대 50건)")
+                return
+        try:
+            trades = self.repo.get_closed_positions(limit)
+            summary = self.repo.get_history_summary(limit)
+            self.tg.send(_history_text(trades, summary))
+        except Exception as e:
+            log.warning("history 오류: %s", e)
+            self.tg.send(f"⚠️ 거래 내역 조회 실패: {e}")
 
     def _cmd_mode(self, text: str) -> None:
         parts = text.split()

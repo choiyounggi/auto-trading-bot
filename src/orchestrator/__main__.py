@@ -19,8 +19,10 @@ from pathlib import Path
 from src.broker.kis_client import KisClient
 from src.guardrails.rules import load_rules
 from src.notify.telegram import send_critical, send_info, send_warning
+from src.orchestrator.capital import compute_capital_plan, position_eval_won
 from src.orchestrator.entry_decision import AccountSnapshot, select_entries
 from src.orchestrator.dip_buy import run_dip_buy
+from src.orchestrator.cash_deploy import run_cash_deploy
 from src.orchestrator.signal_loader import (
     filter_buy_candidates,
     latest_signal_date,
@@ -64,6 +66,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="장중 지수 ETF dip-buy만 실행하고 종료 (15:00 전용 잡).")
     p.add_argument("--carry-over", action="store_true",
                    help="전일(최신) 신호로 익일 시가(시장가) 진입. tradeorch 09:05 잡 전용.")
+    p.add_argument("--deploy-cash", action="store_true",
+                   help="장중 현금 재배치만 실행하고 종료 (09:30~15:00 30분 간격 cashDeploy 잡 전용).")
     return p.parse_args(argv)
 
 
@@ -83,6 +87,34 @@ def run(argv: list[str] | None = None) -> int:
                 log.warning("dip-buy 실패: %s", e)
         else:
             log.info("dip-buy disabled (config)")
+        return 0
+
+    # 장중 현금 재배치 전용 모드 — 09:30~15:00 30분 간격 cashDeploy 잡에서 --deploy-cash로 호출.
+    if args.deploy_cash:
+        if not rules.cash_deploy_enabled:
+            log.info("cash-deploy disabled (config)")
+            return 0
+        # 재배치는 최신(전일 포함) 신호를 쓴다 — 오늘 신호는 16:30에야 생성된다.
+        signal_dir = resolve_signal_dir()
+        target_date = latest_signal_date(signal_dir, "")
+        if target_date is None:
+            log.warning("cash-deploy: 사용 가능한 signal 파일 없음 (%s)", signal_dir)
+            return 0
+        signals = load_signal(
+            signal_dir=signal_dir, target_date=target_date,
+            schema_path=Path("schemas/signal-v1.json"),
+            max_age_min=10080, name_suffix="",
+        )
+        if signals is None:
+            log.warning("cash-deploy: signal 로드 실패 (date=%s)", target_date)
+            return 0
+        buys = filter_buy_candidates(signals, min_score=rules.entry_signal_score_min)
+        try:
+            with KisClient(mode="paper").session() as _cc:
+                n = run_cash_deploy(_cc, Repo(), rules, buys, signals, send_info, send_warning)
+                log.info("cash-deploy: %d건 재배치 매수", n)
+        except Exception as e:
+            log.warning("cash-deploy 실패: %s", e)
         return 0
 
     # 1. signal JSON 로드 (생성 race 대비 30초 간격 3회 재시도)
@@ -179,6 +211,8 @@ def run(argv: list[str] | None = None) -> int:
 
         account = AccountSnapshot(
             cash_won=balance.cash,
+            total_asset_won=balance.total_eval,
+            invested_won=position_eval_won(balance.positions),
             open_positions=active_count,
             daily_pnl_pct=0.0,
             daily_entries_today=daily_entries,
@@ -189,7 +223,25 @@ def run(argv: list[str] | None = None) -> int:
 
         # 3. 진입 결정 — 중복 ticker filter
         candidates = [b for b in buys if not repo.is_duplicate(b["ticker"])]
-        plans, skips = select_entries(candidates, signals, account, rules, repo=repo)
+
+        # 아침 진입에도 배치 예산을 건다 — 없으면 아침 진입이 상한 없이 발주해
+        # 재배치가 쓸 현금을 먹는다.
+        try:
+            deposit = c.get_deposit() or balance.cash
+        except Exception as e:
+            log.info("자본계획: get_deposit 실패, balance.cash로 폴백 (%s)", e)
+            deposit = balance.cash
+        cap = compute_capital_plan(
+            total_asset_won=balance.total_eval,
+            position_eval_won=position_eval_won(balance.positions),
+            pending_notional_won=0,
+            buying_power_won=deposit,
+            rules=rules,
+        )
+        log.info("자본: 총자산=%d, 투자중=%d, 가동률=%.1f%%, 배치가능=%d",
+                 cap.total_asset_won, cap.invested_won, cap.utilization_pct, cap.deployable_won)
+        plans, skips = select_entries(candidates, signals, account, rules, repo=repo,
+                                       deployable_won=cap.deployable_won)
 
         log.info("진입 계획 %d건, skip %d건", len(plans), len(skips))
         for s in skips:

@@ -15,16 +15,18 @@ import {
   type Config,
 } from "../config.js";
 
-/** The seven jobs, all enabled — the shape `parseConfig` defaults to. */
+/** The nine jobs, all enabled — the shape `parseConfig` defaults to. */
 function allJobs(): Record<string, boolean> {
   return {
     orchestrator: true,
     monitor: true,
     reconciler: true,
     dipBuy: true,
+    cashDeploy: true,
     usOrchestrator: true,
     signalKr: true,
     signalUs: true,
+    telegramAgent: true,
   };
 }
 
@@ -32,11 +34,19 @@ function tmp(): string {
   return mkdtempSync(join(tmpdir(), "kis-cfg-"));
 }
 
-/** A minimal object that satisfies every required key. */
+/**
+ * A minimal object that satisfies every required key.
+ *
+ * `projectDir` and `stateDir` are deliberately different roots: the whole point
+ * of `stateDir` is that runtime state does not live inside the installed
+ * package, so a fixture that collapsed them would pass even if the two were
+ * confused in the parser.
+ */
 function validRaw(): Record<string, unknown> {
   return {
     mode: "paper",
     projectDir: "/opt/kis",
+    stateDir: "/var/lib/kis",
     pythonPath: "/usr/bin/python3.11",
     signalDir: "/opt/signals",
   };
@@ -85,8 +95,20 @@ test("an explicit newsLlmBackend parses through unchanged", () => {
   assert.equal(r.value.newsLlmBackend, "codex");
 });
 
-test("defaultSignalDir points at the package's own data/signals", () => {
-  assert.equal(defaultSignalDir("/opt/kis"), "/opt/kis/data/signals");
+test("defaultSignalDir points at data/signals under the state root, not the package", () => {
+  assert.equal(defaultSignalDir("/s"), "/s/data/signals");
+  // The argument is the *state* root now. A signal dir inside the package
+  // directory is destroyed by the next `npm i -g` that replaces it.
+  assert.equal(defaultSignalDir("/var/lib/kis"), "/var/lib/kis/data/signals");
+});
+
+test("stateDir parses through unchanged and stays distinct from projectDir", () => {
+  const r = parseConfig(validRaw());
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.value.stateDir, "/var/lib/kis");
+  assert.equal(r.value.projectDir, "/opt/kis");
+  assert.notEqual(r.value.stateDir, r.value.projectDir);
 });
 
 test("configHome honours an absolute KIS_TRADER_HOME", () => {
@@ -103,6 +125,21 @@ test("a missing signalDir reports the exact required-key message", () => {
   const raw = validRaw();
   delete raw.signalDir;
   assert.ok(errorsOf(raw).includes("signalDir is required"));
+});
+
+test("a missing stateDir reports the exact required-key message and nothing else", () => {
+  const raw = validRaw();
+  delete raw.stateDir;
+  // deepEqual, not `includes`: a stateDir that quietly acquired a parser
+  // default (configHome(), projectDir, …) would make this list empty, and a
+  // second spurious error would mean the absolute-path pass also ran on it.
+  assert.deepEqual(errorsOf(raw), ["stateDir is required"]);
+});
+
+test("a relative stateDir is rejected with the exact absolute-path message", () => {
+  assert.deepEqual(errorsOf({ ...validRaw(), stateDir: "relative/path" }), [
+    "stateDir must be an absolute path",
+  ]);
 });
 
 test("an invalid mode reports the exact allowed-values message", () => {
@@ -136,6 +173,11 @@ test("a non-string newsLlmBackend is rejected with the same message", () => {
 test("a non-boolean job value is rejected by name", () => {
   const errs = errorsOf({ ...validRaw(), jobs: { monitor: "yes" } });
   assert.ok(errs.includes("jobs.monitor must be a boolean"), errs.join("; "));
+  // telegramAgent is the newest key, so it is the one most likely to be
+  // declared in the type but missed by the JOB_KEYS-driven validation loop.
+  assert.deepEqual(errorsOf({ ...validRaw(), jobs: { telegramAgent: "yes" } }), [
+    "jobs.telegramAgent must be a boolean",
+  ]);
   // The keys added last are the ones most likely to miss the JOB_KEYS-driven
   // loop, so they are asserted exactly: one error, named, and nothing else.
   assert.deepEqual(errorsOf({ ...validRaw(), jobs: { usOrchestrator: "yes" } }), [
@@ -146,6 +188,10 @@ test("a non-boolean job value is rejected by name", () => {
   ]);
   assert.deepEqual(errorsOf({ ...validRaw(), jobs: { signalUs: 1 } }), [
     "jobs.signalUs must be a boolean",
+  ]);
+  // cashDeploy is the newest key — same exactly-one-error contract applies.
+  assert.deepEqual(errorsOf({ ...validRaw(), jobs: { cashDeploy: "yes" } }), [
+    "jobs.cashDeploy must be a boolean",
   ]);
 });
 
@@ -206,6 +252,21 @@ test("an empty-string required value counts as missing, not as a bad path", () =
     false,
     "empty string must produce exactly one error, not two",
   );
+
+  // Same rule for the key added by this task — an empty stateDir is missing,
+  // not malformed.
+  assert.deepEqual(errorsOf({ ...validRaw(), stateDir: "" }), ["stateDir is required"]);
+  assert.deepEqual(errorsOf({ ...validRaw(), stateDir: "   " }), ["stateDir is required"]);
+});
+
+test("a non-string stateDir is rejected as missing rather than crashing the parser", () => {
+  for (const bad of [3, null, [], {}, true]) {
+    assert.deepEqual(
+      errorsOf({ ...validRaw(), stateDir: bad }),
+      ["stateDir is required"],
+      `stateDir: ${JSON.stringify(bad)}`,
+    );
+  }
 });
 
 test("a relative required path is rejected as non-absolute", () => {
@@ -227,6 +288,7 @@ test("saveConfig writes mode 0600 and round-trips through loadConfig", () => {
     const cfg: Config = {
       mode: "real",
       projectDir: "/opt/kis",
+      stateDir: "/var/lib/kis",
       pythonPath: "/usr/bin/python3.11",
       signalDir: "/opt/signals",
       llmAgent: "pi",
@@ -236,19 +298,25 @@ test("saveConfig writes mode 0600 and round-trips through loadConfig", () => {
         monitor: false,
         reconciler: true,
         dipBuy: false,
+        cashDeploy: true,
         usOrchestrator: false,
         signalKr: true,
         signalUs: false,
+        telegramAgent: false,
       },
     };
     const p = saveConfig(cfg, dir);
     assert.equal(statSync(p).mode & 0o777, 0o600);
     assert.match(readFileSync(p, "utf8"), /"mode": "real"/);
+    assert.match(readFileSync(p, "utf8"), /"stateDir": "\/var\/lib\/kis"/);
 
     const back = loadConfig(dir);
     assert.equal(back.ok, true);
     if (!back.ok) return;
     assert.deepEqual(back.value, cfg);
+    // Called out separately: a key the writer forgot would round-trip as
+    // "stateDir is required" rather than as a wrong value.
+    assert.equal(back.value.stateDir, "/var/lib/kis");
     // Called out separately: a key that is optional in the parser is exactly the
     // kind that survives a round-trip as its default instead of its saved value.
     assert.equal(back.value.newsLlmBackend, "claude");
@@ -286,6 +354,7 @@ test("partially specified jobs default the unlisted keys to true", () => {
   assert.equal(r.value.jobs.usOrchestrator, true);
   assert.equal(r.value.jobs.signalKr, true);
   assert.equal(r.value.jobs.signalUs, true);
+  assert.equal(r.value.jobs.telegramAgent, true);
 
   // Same rule from the other side: opting one key out must not disturb the
   // others that were already there.
@@ -305,30 +374,56 @@ test("partially specified jobs default the unlisted keys to true", () => {
     signalKr: false,
     signalUs: false,
   });
+
+  // cashDeploy off must not disturb the other eight, same as any other key.
+  const noCashDeploy = parseConfig({ ...validRaw(), jobs: { cashDeploy: false } });
+  assert.equal(noCashDeploy.ok, true);
+  if (!noCashDeploy.ok) return;
+  assert.equal(noCashDeploy.value.jobs.cashDeploy, false);
+  assert.deepEqual(noCashDeploy.value.jobs, { ...allJobs(), cashDeploy: false });
 });
 
-test("omitting jobs enables all seven, including both signal jobs", () => {
+test("an explicit empty jobs object still defaults all nine to true", () => {
+  const r = parseConfig({ ...validRaw(), jobs: {} });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.deepEqual(r.value.jobs, allJobs());
+});
+
+test("an explicitly undefined job value falls through to its default", () => {
+  const r = parseConfig({ ...validRaw(), jobs: { cashDeploy: undefined } });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.value.jobs.cashDeploy, true);
+  assert.deepEqual(r.value.jobs, allJobs());
+});
+
+test("omitting jobs enables all nine, including both signal jobs and the daemon", () => {
   const r = parseConfig(validRaw());
   assert.equal(r.ok, true);
   if (!r.ok) return;
   assert.deepEqual(r.value.jobs, allJobs());
-  assert.equal(Object.keys(r.value.jobs).length, 7);
+  assert.equal(Object.keys(r.value.jobs).length, 9);
 });
 
-test("JOB_KEYS is the whole seven-job inventory, in declared order", () => {
-  assert.equal(JOB_KEYS.length, 7, `JOB_KEYS drifted: ${JOB_KEYS.join(", ")}`);
-  // The two names are a contract with the launchd job table — renaming either
-  // one here silently unpairs a job from its schedule.
+test("JOB_KEYS is the whole nine-job inventory, in declared order", () => {
+  assert.equal(JOB_KEYS.length, 9, `JOB_KEYS drifted: ${JOB_KEYS.join(", ")}`);
+  // These names are a contract with the launchd job table — renaming any one
+  // here silently unpairs a job from its schedule.
   assert.ok(JOB_KEYS.includes("signalKr"), JOB_KEYS.join(", "));
   assert.ok(JOB_KEYS.includes("signalUs"), JOB_KEYS.join(", "));
+  assert.ok(JOB_KEYS.includes("telegramAgent"), JOB_KEYS.join(", "));
+  assert.ok(JOB_KEYS.includes("cashDeploy"), JOB_KEYS.join(", "));
   assert.deepEqual([...JOB_KEYS], [
     "orchestrator",
     "monitor",
     "reconciler",
     "dipBuy",
+    "cashDeploy",
     "usOrchestrator",
     "signalKr",
     "signalUs",
+    "telegramAgent",
   ]);
   // Every key the parser defaults must come from JOB_KEYS and vice versa —
   // a key present in one but not the other is the 5-vs-7 defect this guards.
@@ -379,7 +474,26 @@ test("signalDir stays required — defaultSignalDir is a suggestion, not a defau
   assert.deepEqual(r.errors, ["signalDir is required"]);
 });
 
-test("defaultSignalDir joins onto any project dir without assuming a trailing slash", () => {
-  assert.equal(defaultSignalDir("/opt/kis/"), "/opt/kis/data/signals");
+test("defaultSignalDir joins onto any state dir without assuming a trailing slash", () => {
+  assert.equal(defaultSignalDir("/var/lib/kis/"), "/var/lib/kis/data/signals");
   assert.equal(defaultSignalDir("/"), "/data/signals");
+  assert.equal(defaultSignalDir(""), "data/signals");
+});
+
+test("stateDir stays required — configHome is init's suggestion, not a parser default", () => {
+  // The mirror of the signalDir rule above, and the one that matters most:
+  // silently defaulting stateDir to configHome() would point a hand-edited
+  // config at a state root the user never chose, and the venv and trade
+  // database would follow it there.
+  const raw = validRaw();
+  delete raw.stateDir;
+  const r = parseConfig(raw);
+  assert.equal(r.ok, false, "stateDir must not acquire a parser default");
+  if (r.ok) return;
+  assert.deepEqual(r.errors, ["stateDir is required"]);
+  assert.equal(
+    r.errors.some((e) => e.includes(configHome({ KIS_TRADER_HOME: "/x" }))),
+    false,
+    "the parser must not leak a suggested value into the error",
+  );
 });
