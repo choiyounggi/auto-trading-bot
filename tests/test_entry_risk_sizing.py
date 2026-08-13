@@ -597,3 +597,73 @@ def test_build_prompt_rejects_positional_deployable_won():
     )
     with pytest.raises(TypeError):
         build_prompt(_domestic_candidate("T1"), {}, account, TradingRules(), 100)  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# D9a: 조기 daily_entry_limit 게이트가 quota_override 를 무시하는 결함 회귀 테스트
+# (2026-08-13 t2 워커가 발견, 코디네이터 지시로 t2가 수정)
+# ---------------------------------------------------------------------------
+
+def test_quota_override_lifts_early_daily_limit_gate(monkeypatch):
+    """D9a — 아침 예산이 rules.max_daily_entries 를 이미 다 채웠어도(daily_entries_today==
+    max_daily_entries), quota_override 로 유효 상한을 올렸으면 §2의 조기 게이트가
+    막지 않고 최소 1건은 채택되어야 한다."""
+    def fake_vote(prompt, n, timeout):
+        return _buy_decision(entry_price=10_000, size_pct=5.0, stop_loss_pct=1.5), [
+            {"source": "test", "elapsed_ms": 1, "parse_error": None}
+        ]
+
+    monkeypatch.setattr(mod, "vote_entry", fake_vote)
+
+    rules = TradingRules(
+        max_size_pct=15.0,
+        min_size_pct=0.5,
+        risk_per_trade_pct=0.25,
+        min_stop_loss_pct=1.5,
+        max_stop_loss_pct=3.0,
+        entry_min_confidence=8,
+        max_daily_entries=12,
+        cash_deploy_max_daily_entries=6,
+        strategy_max_daily_entries={"price_momentum": 10},
+    )
+    account = AccountSnapshot(
+        cash_won=25_000_000, total_asset_won=30_000_000,
+        open_positions=0, daily_pnl_pct=0.0, daily_entries_today=12,
+    )
+    candidates = [_domestic_candidate("T1")]
+
+    plans, skips = select_entries(
+        candidates, {}, account, rules,
+        kill_switch_file="tests/__nonexistent_kill_switch__",
+        quota_override=rules.max_daily_entries + rules.cash_deploy_max_daily_entries,
+    )
+
+    assert len(plans) >= 1
+    assert not any(s.reason == "daily_entry_limit" for s in skips)
+
+
+def test_daily_limit_gate_still_blocks_without_quota_override(monkeypatch):
+    """D9a 회귀 — quota_override 를 안 넘기면 daily_entries_today >= max_daily_entries
+    에서 여전히 즉시 daily_entry_limit 으로 전종목 차단되는 기존 동작이 유지된다."""
+    def fake_vote(prompt, n, timeout):
+        return _buy_decision(entry_price=10_000, size_pct=5.0, stop_loss_pct=1.5), [
+            {"source": "test", "elapsed_ms": 1, "parse_error": None}
+        ]
+
+    monkeypatch.setattr(mod, "vote_entry", fake_vote)
+
+    rules = TradingRules(max_daily_entries=12, cash_deploy_max_daily_entries=6)
+    account = AccountSnapshot(
+        cash_won=25_000_000, total_asset_won=30_000_000,
+        open_positions=0, daily_pnl_pct=0.0, daily_entries_today=12,
+    )
+    candidates = [_domestic_candidate("T1")]
+
+    plans, skips = select_entries(
+        candidates, {}, account, rules,
+        kill_switch_file="tests/__nonexistent_kill_switch__",
+        quota_override=None,
+    )
+
+    assert plans == []
+    assert all(s.reason == "daily_entry_limit" for s in skips)
