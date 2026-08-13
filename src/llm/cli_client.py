@@ -94,15 +94,23 @@ def call_llm(prompt: str, timeout: int = DEFAULT_ENTRY_TIMEOUT) -> tuple[str, st
     Returns (output, source, elapsed_ms).
     source ∈ {claude, pi, unavailable}.
     실패 시 output=에러요약, source=unavailable.
+
+    **pi 를 먼저 시도한다.** claude CLI 는 호출마다 사용자의 플러그인·MCP 스택을
+    통째로 부팅하는데, 그 부팅 구간이 머신 상태에 따라 timeout 까지 멈춘다
+    (2026-08-13 실측: cashDeploy 8회 실행에서 9회 전부 180초 타임아웃 후 pi 폴백,
+    같은 날 09:07 에는 38초로 성공 — 간헐적이다). pi 는 --no-extensions
+    --no-tools --no-skills --no-session 으로 그 스택을 타지 않아 같은 프롬프트를
+    15~19초에 처리한다. 순서를 뒤집으면 후보당 ~200초가 ~18초로 줄고, claude 는
+    폴백으로 남아 판단 품질의 상한은 그대로다.
     """
-    ok, out, ms = _try_claude(prompt, timeout)
+    ok, out, ms = _try_pi(prompt, timeout)
     if ok:
-        return out, "claude", ms
-    log.warning("claude 실패 (%dms): %s → pi fallback", ms, out[:200])
+        return out, "pi", ms
+    log.warning("pi 실패 (%dms): %s → claude fallback", ms, out[:200])
 
-    ok, out2, ms2 = _try_pi(prompt, timeout)
+    ok, out2, ms2 = _try_claude(prompt, timeout)
     if ok:
-        return out2, "pi", ms2
-    log.warning("pi 실패 (%dms): %s", ms2, out2[:200])
+        return out2, "claude", ms2
+    log.warning("claude 실패 (%dms): %s", ms2, out2[:200])
 
-    return f"LLM 분석 실패: claude={out[:100]} / pi={out2[:100]}", "unavailable", ms + ms2
+    return f"LLM 분석 실패: pi={out[:100]} / claude={out2[:100]}", "unavailable", ms + ms2

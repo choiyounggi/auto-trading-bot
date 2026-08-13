@@ -334,6 +334,24 @@ class Repo:
             total_pnl_won=total_pnl_won,
         )
 
+    def get_tickers_closed_today(self, today: date | None = None) -> set[str]:
+        """오늘 청산된 종목코드 집합.
+
+        `is_duplicate` 는 OPEN/PENDING 만 막으므로, 몇 분 만에 청산된 종목은
+        다음 재배치 틱에 곧바로 재매수 대상이 된다 (2026-08-13 실측: 같은 종목
+        1주짜리 왕복 6회). 당일 재진입을 막으려면 CLOSED 도 봐야 한다.
+        """
+        day = today or date.today()
+        start = datetime(day.year, day.month, day.day)
+        with self.SessionLocal() as s:
+            rows = s.execute(
+                select(Position.ticker).where(
+                    Position.status == "CLOSED",
+                    Position.exit_at >= start,
+                )
+            ).scalars().all()
+            return set(rows)
+
     def is_duplicate(self, ticker: str) -> bool:
         with self.SessionLocal() as s:
             cnt = s.execute(

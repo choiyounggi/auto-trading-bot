@@ -1,9 +1,14 @@
 """장중 현금 재배치 — 30분마다 가동률을 점검해 미달분만큼 추가 진입한다.
 
-`cashDeploy` launchd 잡은 평일 09:30~15:00 30분 간격 12회 실행되고 `guarded: true`다.
-락 만료(15분) 안에 한 회 실행이 끝나야 하므로, 틱당 LLM 평가 후보를
-`rules.cash_deploy_max_candidates_per_run`(4)건으로 상한을 둔다: 최악
-4×180s = 12분 < 락 만료 15분 < 스케줄 간격 30분.
+`cashDeploy` launchd 잡은 평일 09:30~14:30 30분 간격 11회 실행되고 `guarded: true`다.
+틱당 LLM 평가 후보는 `rules.cash_deploy_max_candidates_per_run`(4)건으로 제한한다.
+
+한 회 실행 시간의 현실적 기대치는 후보당 pi 15~19초 × 4 ≈ 1분이다. 다만 이것은
+보장이 아니다: `call_llm` 은 pi 실패 시 claude 로 폴백하며 **양쪽 모두에 같은
+timeout(진입 180초)을 준다.** 둘 다 응답 없이 매달리는 최악의 경우 후보당 360초라
+4건이면 24분으로 락 만료(15분)를 넘길 수 있다. 그때는 다음 틱이 만료된 락을
+회수해 이어받으므로 스케줄이 영구히 막히지는 않지만, 겹쳐 도는 구간이 생긴다.
+timeout 예산을 줄이는 것이 근본 해법이며 아직 하지 않았다.
 
 순수 로직(compute_pending_notional / pick_candidates / should_warn_underrun)은
 단위테스트하고, KIS/DB IO는 run_cash_deploy 하나에 몰아둔다
@@ -43,14 +48,65 @@ def compute_pending_notional(pending_positions) -> int:
 
 
 def pick_candidates(candidates: list[dict], repo: Any, limit: int) -> list[dict]:
-    """국내 후보만, 중복 종목 제외, score 내림차순, 최대 limit 개."""
+    """국내 후보만, 보유중·당일청산 종목 제외, score 내림차순, 최대 limit 개.
+
+    당일 청산 종목을 빼는 이유: `is_duplicate` 는 OPEN/PENDING 만 막는데,
+    체결 직후 청산된 종목은 다음 틱에 깨끗해 보여 같은 종목을 반복 매수하게 된다
+    (2026-08-13 실측: SK하이닉스 1주 왕복 6회, 순손익 -7,000원).
+    """
+    closed_today = repo.get_tickers_closed_today()
     filtered = [
         c for c in candidates
         if _asset_class(c) == "domestic_stock"
         and not repo.is_duplicate(c["ticker"])
+        and c["ticker"] not in closed_today
     ]
     filtered.sort(key=lambda c: -c.get("score", 0))
     return filtered[:limit]
+
+
+def fetch_live_quotes(client: Any, candidates: list[dict]) -> dict[str, Any]:
+    """후보별 실시간 시세(ticker → Quote). 조회 실패 종목은 dict 에서 빠진다.
+
+    신호 파일은 전일자라 종가가 낡았다. 그 값으로 SL/TP 를 잡고 시장가로 내면
+    체결이 범위 밖에서 일어나 포지션이 태어나자마자 청산된다. 시세를 못 얻으면
+    낡은 값으로 넘어가지 말고 그 후보를 건너뛴다 — 호출자가 그렇게 처리한다.
+    """
+    quotes: dict[str, Any] = {}
+    for c in candidates:
+        ticker = c["ticker"]
+        try:
+            quote = client.get_quote(ticker)
+        except Exception as e:
+            log.warning("재배치: %s 시세 조회 예외 — 건너뜀 (%s)", ticker, e)
+            continue
+        if not quote or quote.current_price <= 0:
+            log.warning("재배치: %s 현재가 조회 실패 — 건너뜀", ticker)
+            continue
+        quotes[ticker] = quote
+        stale = (c.get("panel_summary") or {}).get("last_close") or 0
+        if stale > 0:
+            drift = (quote.current_price / stale - 1) * 100
+            log.info("재배치: %s 신호종가 %d → 현재가 %d (%+.2f%%)",
+                     ticker, stale, quote.current_price, drift)
+        time.sleep(_KIS_GAP_SEC)
+    return quotes
+
+
+def refresh_panel(candidate: dict, quote: Any) -> None:
+    """후보의 panel_summary 를 실시간 시세로 덮어쓴다 (in-place).
+
+    `last_close` 만 갈고 `d_change_pct` 를 두면 프롬프트가 "종가 1,612,000,
+    등락률 -0.3%" 처럼 **현재가 옆에 전일 기준 등락률**을 붙여 보여준다. LLM 이
+    "이 종목이 얼마나 달아올랐는가"를 잘못 읽게 되므로 둘을 함께 갈아야 한다.
+    등락률은 브로커가 주는 값을 그대로 쓴다 — 우리가 재계산하지 않는다.
+    """
+    panel = dict(candidate.get("panel_summary") or {})
+    panel["last_close"] = quote.current_price
+    d_change = getattr(quote, "d_change_pct", None)
+    if d_change is not None:
+        panel["d_change_pct"] = d_change
+    candidate["panel_summary"] = panel
 
 
 def should_warn_underrun(today: str, marker: Path = _WARN_MARKER) -> bool:
@@ -134,6 +190,20 @@ def run_cash_deploy(
         _maybe_warn_underrun(plan, rules, send_warning)
         return 0
 
+    # 실시간 시세를 못 얻은 후보는 낡은 종가로 발주하지 않고 아예 뺀다.
+    quotes = fetch_live_quotes(client, picked)
+    picked = [c for c in picked if c["ticker"] in quotes]
+    if not picked:
+        log.warning("재배치: 시세를 얻은 후보가 없어 진입 skip")
+        _maybe_warn_underrun(plan, rules, send_warning)
+        return 0
+
+    # LLM 프롬프트의 시세도 실시간으로 갱신한다 — 판단 근거와 체결 가격이 어긋나면
+    # 논리는 낡은 가격, 주문은 현재 가격이라는 상태가 된다.
+    for c in picked:
+        refresh_panel(c, quotes[c["ticker"]])
+    reference_prices = {t: q.current_price for t, q in quotes.items()}
+
     account = AccountSnapshot(
         cash_won=balance.cash,
         total_asset_won=balance.total_eval,
@@ -147,6 +217,7 @@ def run_cash_deploy(
         picked, signals, account, rules, repo=repo,
         deployable_won=plan.deployable_won,
         quota_override=rules.max_daily_entries + rules.cash_deploy_max_daily_entries,
+        reference_prices=reference_prices,
     )
     log.info("재배치 진입 계획 %d건, skip %d건", len(plans), len(skips))
     for s in skips:

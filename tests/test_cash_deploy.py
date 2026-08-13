@@ -14,6 +14,8 @@ from src.guardrails.rules import TradingRules
 from src.llm.schemas import EntryDecision
 from src.orchestrator import entry_decision as entry_mod
 from src.orchestrator.cash_deploy import (
+    fetch_live_quotes,
+    refresh_panel,
     compute_pending_notional,
     pick_candidates,
     run_cash_deploy,
@@ -26,12 +28,17 @@ from src.orchestrator.cash_deploy import (
 # ---------------------------------------------------------------------------
 
 class FakeRepo:
-    def __init__(self, pending=None, active=None, today_entries=0, duplicates=None):
+    def __init__(self, pending=None, active=None, today_entries=0, duplicates=None,
+                 closed_today=None):
         self._pending = pending or []
         self._active = active or []
         self._today_entries = today_entries
         self._duplicates = duplicates or set()
+        self._closed_today = closed_today or set()
         self.inserted: list[dict] = []
+
+    def get_tickers_closed_today(self):
+        return self._closed_today
 
     def get_pending_positions(self):
         return self._pending
@@ -65,7 +72,12 @@ class FakeOrderResult:
 
 
 class FakeClient:
-    def __init__(self, balance, deposit=None, deposit_error=None, submit_accept=True, submit_msg1=""):
+    def __init__(self, balance, deposit=None, deposit_error=None, submit_accept=True,
+                 submit_msg1="", quotes=None, quote_error=None, d_change=None):
+        self._quotes = quotes if quotes is not None else {}
+        self._d_change = d_change or {}
+        self._quote_error = quote_error
+        self.quote_calls: list[str] = []
         self._balance = balance
         self._deposit = deposit
         self._deposit_error = deposit_error
@@ -84,6 +96,16 @@ class FakeClient:
         if self._deposit_error is not None:
             raise self._deposit_error
         return self._deposit
+
+    def get_quote(self, ticker):
+        self.quote_calls.append(ticker)
+        if self._quote_error is not None:
+            raise self._quote_error
+        px = self._quotes.get(ticker, 10_000)
+        if px is None:
+            return None
+        return SimpleNamespace(ticker=ticker, current_price=px,
+                               d_change_pct=self._d_change.get(ticker, 0.0))
 
     def submit_buy(self, ticker, qty, price, order_type="limit"):
         self.submit_calls.append((ticker, qty, price, order_type))
@@ -762,3 +784,152 @@ def test_existing_dip_only_and_carry_over_and_asset_class_flags_unchanged():
     args = main_mod.parse_args(["--asset-class", "overseas_stock"])
     assert args.asset_class == "overseas_stock"
     assert args.deploy_cash is False
+
+
+# ===========================================================================
+# 2026-08-13 실장애 회귀 — 낡은 신호가로 SL/TP 산출 + 동일 종목 반복 매수
+# ===========================================================================
+
+def test_pick_candidates_excludes_ticker_closed_today():
+    """당일 청산 종목은 다음 틱에서 재매수 후보가 아니다 (1주 왕복 6회 재발 방지)."""
+    repo = FakeRepo(closed_today={"000660"})
+    picked = pick_candidates(
+        [_candidate("000660", "SK하이닉스", score=9), _candidate("005930", "삼성전자", score=8)],
+        repo, 4,
+    )
+    assert [c["ticker"] for c in picked] == ["005930"]
+
+
+def test_pick_candidates_keeps_ticker_closed_on_another_day():
+    """당일이 아닌 청산은 막지 않는다 — get_tickers_closed_today 가 오늘만 준다."""
+    repo = FakeRepo(closed_today=set())
+    picked = pick_candidates([_candidate("000660", "SK하이닉스")], repo, 4)
+    assert [c["ticker"] for c in picked] == ["000660"]
+
+
+def test_fetch_live_quotes_returns_live_quotes():
+    client = FakeClient(_balance(), quotes={"005930": 71_200, "000660": 1_612_000})
+    q = fetch_live_quotes(client, [_candidate("005930"), _candidate("000660")])
+    assert {t: v.current_price for t, v in q.items()} == {"005930": 71_200, "000660": 1_612_000}
+    assert client.quote_calls == ["005930", "000660"]
+
+
+def test_fetch_live_quotes_drops_candidate_on_quote_failure():
+    """시세를 못 얻으면 낡은 종가로 넘어가지 않고 dict 에서 빠진다."""
+    client = FakeClient(_balance(), quotes={"005930": None, "000660": 1_612_000})
+    q = fetch_live_quotes(client, [_candidate("005930"), _candidate("000660")])
+    assert {t: v.current_price for t, v in q.items()} == {"000660": 1_612_000}
+
+
+def test_fetch_live_quotes_drops_candidate_on_zero_price():
+    client = FakeClient(_balance(), quotes={"005930": 0})
+    assert fetch_live_quotes(client, [_candidate("005930")]) == {}
+
+
+def test_fetch_live_quotes_survives_quote_exception():
+    client = FakeClient(_balance(), quote_error=RuntimeError("boom"))
+    assert fetch_live_quotes(client, [_candidate("005930")]) == {}
+
+
+def test_fetch_live_quotes_empty_input():
+    client = FakeClient(_balance())
+    assert fetch_live_quotes(client, []) == {}
+
+
+def test_run_cash_deploy_prices_order_from_live_quote_not_stale_close(monkeypatch):
+    """실장애 재현 회귀 — 신호 1,504,000 / 실제 1,612,000 이면 주문가는 실제 쪽이어야 한다.
+
+    낡은 값으로 잡으면 TP(1,572,000)가 체결가보다 낮아 포지션이 태어나자마자 청산된다.
+    """
+    monkeypatch.setattr(entry_mod, "vote_entry", _fake_vote(
+        entry_price=1_504_000, size_pct=15.0, stop_loss_pct=2.5, take_profit_pct=4.5))
+    client = FakeClient(_balance(cash=25_000_000, total_eval=30_000_000),
+                        deposit=25_000_000, quotes={"000660": 1_612_000})
+    repo = FakeRepo()
+    sent: list[str] = []
+    n = run_cash_deploy(
+        client, repo, _rules(), [_candidate("000660", "SK하이닉스",
+                                            panel_summary={"last_close": 1_504_000})],
+        {}, sent.append, sent.append,
+    )
+    assert n == 1
+    ticker, qty, price, order_type = client.submit_calls[0]
+    assert ticker == "000660"
+    assert price >= 1_612_000, f"주문가가 낡은 종가 기준이다: {price}"
+    pos = repo.inserted[0]
+    assert pos["take_profit"] > price, (
+        f"익절가({pos['take_profit']})가 체결 기준가({price}) 이하 — 즉시 청산된다"
+    )
+    assert pos["stop_loss"] < price
+
+
+def test_run_cash_deploy_skips_candidate_without_quote(monkeypatch):
+    monkeypatch.setattr(entry_mod, "vote_entry", _fake_vote())
+    client = FakeClient(_balance(), deposit=25_000_000, quotes={"005930": None})
+    repo = FakeRepo()
+    sent: list[str] = []
+    n = run_cash_deploy(client, repo, _rules(), [_candidate("005930")], {},
+                        sent.append, sent.append)
+    assert n == 0
+    assert client.submit_calls == []
+
+
+def test_run_cash_deploy_refreshes_prompt_close_with_live_price(monkeypatch):
+    """프롬프트의 종가도 실시간으로 갱신된다 — 논리와 체결가가 갈라지지 않게."""
+    seen: dict[str, str] = {}
+
+    def spy_vote(prompt, n, timeout):
+        seen["prompt"] = prompt
+        return _fake_vote(entry_price=1_504_000)(prompt, n, timeout)
+
+    monkeypatch.setattr(entry_mod, "vote_entry", spy_vote)
+    client = FakeClient(_balance(), deposit=25_000_000, quotes={"000660": 1_612_000})
+    run_cash_deploy(client, FakeRepo(), _rules(),
+                    [_candidate("000660", "SK하이닉스",
+                                panel_summary={"last_close": 1_504_000})],
+                    {}, lambda m: None, lambda m: None)
+    assert "1,612,000" in seen["prompt"]
+    assert "1,504,000" not in seen["prompt"]
+
+
+def test_refresh_panel_updates_both_price_and_change_pct():
+    """last_close 만 갈고 d_change_pct 를 두면 현재가 옆에 전일 등락률이 붙는다."""
+    c = _candidate("000660", panel_summary={"last_close": 1_504_000, "d_change_pct": -0.3,
+                                            "vol_ratio_5d": 1.2})
+    refresh_panel(c, SimpleNamespace(current_price=1_612_000, d_change_pct=7.18))
+    assert c["panel_summary"]["last_close"] == 1_612_000
+    assert c["panel_summary"]["d_change_pct"] == 7.18
+    assert c["panel_summary"]["vol_ratio_5d"] == 1.2, "무관한 필드는 보존"
+
+
+def test_refresh_panel_keeps_stale_change_when_quote_lacks_it():
+    c = _candidate("000660", panel_summary={"last_close": 1_504_000, "d_change_pct": -0.3})
+    refresh_panel(c, SimpleNamespace(current_price=1_612_000))
+    assert c["panel_summary"]["last_close"] == 1_612_000
+    assert c["panel_summary"]["d_change_pct"] == -0.3
+
+
+def test_refresh_panel_on_candidate_without_panel():
+    c = _candidate("000660")
+    c.pop("panel_summary", None)
+    refresh_panel(c, SimpleNamespace(current_price=1_000, d_change_pct=1.0))
+    assert c["panel_summary"] == {"last_close": 1_000, "d_change_pct": 1.0}
+
+
+def test_run_cash_deploy_prompt_shows_live_change_pct_not_stale(monkeypatch):
+    """프롬프트의 등락률이 실시간 값이어야 한다 — 현재가와 짝이 맞아야 한다."""
+    seen: dict[str, str] = {}
+
+    def spy_vote(prompt, n, timeout):
+        seen["prompt"] = prompt
+        return _fake_vote(entry_price=1_504_000)(prompt, n, timeout)
+
+    monkeypatch.setattr(entry_mod, "vote_entry", spy_vote)
+    client = FakeClient(_balance(), deposit=25_000_000,
+                        quotes={"000660": 1_612_000}, d_change={"000660": 7.18})
+    run_cash_deploy(client, FakeRepo(), _rules(),
+                    [_candidate("000660", "SK하이닉스",
+                                panel_summary={"last_close": 1_504_000, "d_change_pct": -0.30})],
+                    {}, lambda m: None, lambda m: None)
+    assert "+7.18%" in seen["prompt"]
+    assert "-0.30%" not in seen["prompt"]
