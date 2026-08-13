@@ -1,0 +1,194 @@
+"""장중 현금 재배치 — 30분마다 가동률을 점검해 미달분만큼 추가 진입한다.
+
+`cashDeploy` launchd 잡은 평일 09:30~15:00 30분 간격 12회 실행되고 `guarded: true`다.
+락 만료(15분) 안에 한 회 실행이 끝나야 하므로, 틱당 LLM 평가 후보를
+`rules.cash_deploy_max_candidates_per_run`(4)건으로 상한을 둔다: 최악
+4×180s = 12분 < 락 만료 15분 < 스케줄 간격 30분.
+
+순수 로직(compute_pending_notional / pick_candidates / should_warn_underrun)은
+단위테스트하고, KIS/DB IO는 run_cash_deploy 하나에 몰아둔다
+(src/orchestrator/dip_buy.py 와 같은 구조).
+"""
+from __future__ import annotations
+
+import logging
+import time
+from datetime import date
+from pathlib import Path
+from typing import Any, Callable
+
+from src.orchestrator.capital import compute_capital_plan, position_eval_won
+from src.orchestrator.dip_buy import _KIS_GAP_SEC, is_market_closed_reject
+from src.orchestrator.entry_decision import AccountSnapshot, _asset_class, select_entries
+
+log = logging.getLogger("stock-trader.cash_deploy")
+
+_WARN_MARKER = Path("data/logs/.cash_deploy_underrun")
+
+
+def compute_pending_notional(pending_positions) -> int:
+    """PENDING 포지션의 미체결 명목금액 합. entry_price_target × entry_qty.
+
+    D7 — 미체결 주문의 명목금액을 투자중으로 잡지 않으면, 다음 30분 틱이
+    같은 현금을 다시 배치해 이중 매수가 난다.
+    """
+    total = 0
+    for pos in pending_positions:
+        price = pos.entry_price_target
+        qty = pos.entry_qty
+        if price is None or qty is None:
+            continue
+        total += price * qty
+    return total
+
+
+def pick_candidates(candidates: list[dict], repo: Any, limit: int) -> list[dict]:
+    """국내 후보만, 중복 종목 제외, score 내림차순, 최대 limit 개."""
+    filtered = [
+        c for c in candidates
+        if _asset_class(c) == "domestic_stock"
+        and not repo.is_duplicate(c["ticker"])
+    ]
+    filtered.sort(key=lambda c: -c.get("score", 0))
+    return filtered[:limit]
+
+
+def should_warn_underrun(today: str, marker: Path = _WARN_MARKER) -> bool:
+    """오늘 아직 경고하지 않았으면 True. True 를 반환할 때 마커를 오늘 날짜로 갱신한다.
+
+    읽기/쓰기 실패(OSError)는 삼키고 True 를 반환한다 — 경고를 못 보내는 것보다
+    중복 경고가 낫다.
+    """
+    try:
+        if marker.exists() and marker.read_text().strip() == today:
+            return False
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(today)
+        return True
+    except OSError:
+        return True
+
+
+def _maybe_warn_underrun(plan, rules: Any, send_warning: Callable[[str], Any]) -> None:
+    if plan.utilization_pct >= rules.cash_deploy_underrun_warn_pct:
+        return
+    # 기본 인자가 아니라 모듈 전역을 직접 참조 — 기본 인자는 def 시점에 바인딩돼
+    # 테스트의 monkeypatch(_WARN_MARKER)가 반영되지 않는다.
+    if not should_warn_underrun(date.today().isoformat(), marker=_WARN_MARKER):
+        return
+    send_warning(
+        f"⚠️ 가동률 {plan.utilization_pct:.1f}% (목표 {plan.target_pct:.0f}%) — "
+        f"배치 가능 {plan.deployable_won:,}원인데 진입 후보가 없어. 신호가 부족한 날이야."
+    )
+
+
+def run_cash_deploy(
+    client: Any,
+    repo: Any,
+    rules: Any,
+    candidates: list[dict],
+    signals: dict,
+    send_info: Callable[[str], Any],
+    send_warning: Callable[[str], Any],
+) -> int:
+    """가동률 미달분만큼 1회 재배치. 접수된 주문 수를 반환.
+
+    예외를 밖으로 내보내지 않는다 — launchd 잡이 비정상 종료하면 안 된다.
+    """
+    if not rules.cash_deploy_enabled:
+        log.info("cash-deploy disabled (config)")
+        return 0
+
+    balance = client.get_balance()
+    if balance is None:
+        send_warning("재배치: KIS 잔고 조회 실패")
+        return 0
+
+    time.sleep(_KIS_GAP_SEC)
+    try:
+        buying_power = client.get_deposit() or balance.cash
+    except Exception as e:
+        log.info("재배치: get_deposit 실패, balance.cash로 폴백 (%s)", e)
+        buying_power = balance.cash
+
+    pending_notional = compute_pending_notional(repo.get_pending_positions())
+    plan = compute_capital_plan(
+        total_asset_won=balance.total_eval,
+        position_eval_won=position_eval_won(balance.positions),
+        pending_notional_won=pending_notional,
+        buying_power_won=buying_power,
+        rules=rules,
+    )
+    log.info(
+        "재배치 자본계획: total=%d invested=%d(%.1f%%) buying_power=%d deployable=%d pending=%d",
+        plan.total_asset_won, plan.invested_won, plan.utilization_pct,
+        plan.buying_power_won, plan.deployable_won, pending_notional,
+    )
+
+    if plan.deployable_won < rules.cash_deploy_min_deploy_won:
+        _maybe_warn_underrun(plan, rules, send_warning)
+        return 0
+
+    picked = pick_candidates(candidates, repo, rules.cash_deploy_max_candidates_per_run)
+    if not picked:
+        _maybe_warn_underrun(plan, rules, send_warning)
+        return 0
+
+    account = AccountSnapshot(
+        cash_won=balance.cash,
+        total_asset_won=balance.total_eval,
+        invested_won=plan.invested_won,
+        pending_notional_won=pending_notional,
+        open_positions=len(repo.get_active_positions()),
+        daily_pnl_pct=0.0,
+        daily_entries_today=repo.get_today_entries(),
+    )
+    plans, skips = select_entries(
+        picked, signals, account, rules, repo=repo,
+        deployable_won=plan.deployable_won,
+        quota_override=rules.max_daily_entries + rules.cash_deploy_max_daily_entries,
+    )
+    log.info("재배치 진입 계획 %d건, skip %d건", len(plans), len(skips))
+    for s in skips:
+        log.info("  SKIP %s %s: %s", s.ticker, s.name, s.reason)
+
+    accepted = 0
+    for p in plans:
+        time.sleep(_KIS_GAP_SEC)
+        result = client.submit_buy(p.ticker, p.qty, p.entry_price_tick, order_type="market")
+        if not result.accepted:
+            msg = str(result.raw.get("msg1", result.raw))
+            if is_market_closed_reject(msg):
+                log.info("재배치 %s: 정규장 시간 아님으로 skip (%s)", p.ticker, msg)
+            else:
+                send_warning(f"재배치 주문 거부 {p.ticker} {p.name}: {msg}")
+            continue
+
+        pos_id = repo.insert_position(
+            ticker=p.ticker,
+            name=p.name,
+            signal_score=p.signal_score,
+            confidence=int(p.decision.confidence),
+            broker_order_id=result.broker_order_id,
+            strategy=p.decision.entry_strategy,
+            price_target=p.entry_price_tick,
+            qty=p.qty,
+            thesis=p.decision.key_thesis,
+            watch_signals=p.decision.watch_signals,
+            stop_loss=p.stop_loss_price,
+            take_profit=p.take_profit_price,
+            max_hold_days=p.decision.max_hold_days,
+            strategy_id=p.strategy_id,
+            strategy_score=p.strategy_score,
+            features=p.features,
+        )
+        accepted += 1
+        send_info(
+            f"🔁 재배치 매수 접수: {p.name} ({p.ticker}) 주문번호 {result.broker_order_id}\n"
+            f"포지션 ID: {pos_id}\n"
+            f"전략: {p.strategy_id} (+{p.strategy_score})\n"
+            f"가격 {p.entry_price_tick:,} × {p.qty}주 = {p.entry_price_tick * p.qty:,}원\n"
+            f"손절 {p.stop_loss_price:,} / 익절 {p.take_profit_price:,}"
+        )
+
+    return accepted

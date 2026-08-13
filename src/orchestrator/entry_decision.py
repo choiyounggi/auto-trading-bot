@@ -435,8 +435,10 @@ def select_entries(
         if not candidates:
             return [], initial_skips
 
-    # 2. 일일 진입 한도
-    if account.daily_entries_today >= rules.max_daily_entries:
+    # 2. 일일 진입 한도 — quota_override 가 있으면 그 유효 상한을 게이트도 함께 본다
+    # (D9a: 게이트와 quota 계산이 다른 상한을 쓰면 quota_override 가 무력화된다).
+    effective_max_entries = quota_override if quota_override is not None else rules.max_daily_entries
+    if account.daily_entries_today >= effective_max_entries:
         return [], [SkipReason(c["ticker"], c["name"], "daily_entry_limit") for c in candidates]
 
     # 3. 보유 종목 한도
@@ -446,7 +448,7 @@ def select_entries(
     # 4. 후보별 LLM 평가
     plans: list[EntryPlan] = []
     skips: list[SkipReason] = list(initial_skips)
-    quota = (quota_override if quota_override is not None else rules.max_daily_entries) - account.daily_entries_today
+    quota = effective_max_entries - account.daily_entries_today
 
     selected_tickers: set[str] = set()
     strategy_counts: dict[str, int] = {}
