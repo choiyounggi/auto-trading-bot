@@ -272,6 +272,7 @@ def evaluate_candidate(
     repo: Repo | None = None,
     *,
     budget_won: int | None = None,
+    reference_price: int | None = None,
 ) -> tuple[EntryPlan | None, str | None]:
     """단일 후보 평가. (EntryPlan, None) 또는 (None, skip_reason)."""
 
@@ -353,7 +354,14 @@ def evaluate_candidate(
         clamped = clamped.model_copy(update={"entry_price": entry_price, "size_pct": size_pct})
     else:
         scale = 1
-        entry_price = round_to_tick(clamped.entry_price, mode="floor")  # 매수 보수
+        # reference_price 는 호출자가 넘긴 실시간 시세다. 장중 재배치처럼 신호가
+        # 전일자일 때, LLM 이 낡은 종가를 보고 답한 entry_price 로 SL/TP 를 잡으면
+        # 시장가 체결이 그 범위 밖에서 이뤄져 포지션이 태어나자마자 청산된다
+        # (2026-08-13 실측: 신호 1,504,000 / 체결 1,600,000~1,624,000 / TP 1,572,000
+        # → 6건 전부 체결 즉시 TAKE_PROFIT). 실제 체결이 일어날 가격을 기준으로
+        # 잡아야 손절·익절폭이 의미를 갖는다.
+        raw_entry = reference_price if reference_price else clamped.entry_price
+        entry_price = round_to_tick(raw_entry, mode="floor")  # 매수 보수
         stop_loss = calc_stop_loss_price(entry_price, clamped.stop_loss_pct)
         take_profit = calc_take_profit_price(entry_price, clamped.take_profit_pct)
         capital = account.sizing_base_won      # ← account.cash_won 에서 변경
@@ -408,6 +416,7 @@ def select_entries(
     *,
     deployable_won: int | None = None,
     quota_override: int | None = None,
+    reference_prices: dict[str, int] | None = None,
 ) -> tuple[list[EntryPlan], list[SkipReason]]:
     """전체 후보 → 진입 계획 + 거부 사유."""
     candidates = list(candidates)
@@ -472,7 +481,12 @@ def select_entries(
             skips.append(SkipReason(c["ticker"], c["name"], "budget_exhausted"))
             continue
         candidate_budget = None if is_overseas else remaining
-        plan, reason = evaluate_candidate(c, signals, account, rules, repo=repo, budget_won=candidate_budget)
+        # 해외는 minor unit(USD cent) 체계라 원화 실시간 시세를 섞지 않는다.
+        ref = None if is_overseas else (reference_prices or {}).get(c["ticker"])
+        plan, reason = evaluate_candidate(
+            c, signals, account, rules, repo=repo,
+            budget_won=candidate_budget, reference_price=ref,
+        )
         if plan:
             plans.append(plan)
             selected_tickers.add(plan.ticker)

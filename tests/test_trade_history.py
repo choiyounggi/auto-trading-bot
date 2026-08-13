@@ -376,3 +376,52 @@ def test_help_text_mentions_history_command():
     agent.handle_text("/help")
 
     assert any("/history" in m for m in tg.sent)
+
+
+# ===========================================================================
+# get_tickers_closed_today — 당일 재진입 쿨다운의 데이터 소스
+# ===========================================================================
+
+def test_tickers_closed_today_returns_only_todays_exits(tmp_path):
+    repo = _repo(tmp_path)
+    today = datetime(2026, 8, 13, 11, 33, 0)
+    _insert(repo, ticker="000660", exit_at=today)
+    _insert(repo, ticker="005930", exit_at=datetime(2026, 8, 12, 15, 0, 0))
+    assert repo.get_tickers_closed_today(today=today.date()) == {"000660"}
+
+
+def test_tickers_closed_today_dedupes_repeated_exits(tmp_path):
+    """같은 종목을 하루에 여러 번 청산해도 집합이라 한 번만 나온다."""
+    repo = _repo(tmp_path)
+    today = datetime(2026, 8, 13, 11, 0, 0)
+    for h in (11, 12, 13):
+        _insert(repo, ticker="000660", exit_at=today.replace(hour=h))
+    assert repo.get_tickers_closed_today(today=today.date()) == {"000660"}
+
+
+def test_tickers_closed_today_ignores_open_and_pending(tmp_path):
+    repo = _repo(tmp_path)
+    today = datetime(2026, 8, 13, 11, 0, 0)
+    _insert(repo, ticker="111111", status="OPEN", exit_at=None)
+    _insert(repo, ticker="222222", status="PENDING", exit_at=None)
+    assert repo.get_tickers_closed_today(today=today.date()) == set()
+
+
+def test_tickers_closed_today_empty_db(tmp_path):
+    repo = _repo(tmp_path)
+    assert repo.get_tickers_closed_today(today=datetime(2026, 8, 13).date()) == set()
+
+
+def test_tickers_closed_today_includes_exit_at_midnight_boundary(tmp_path):
+    """00:00:00 청산도 당일에 포함된다 — 경계 포함 여부."""
+    repo = _repo(tmp_path)
+    day = datetime(2026, 8, 13)
+    _insert(repo, ticker="333333", exit_at=day)
+    assert repo.get_tickers_closed_today(today=day.date()) == {"333333"}
+
+
+def test_tickers_closed_today_excludes_null_exit_at(tmp_path):
+    """exit_at 이 NULL 인 CLOSED 로우는 날짜를 알 수 없으므로 제외된다."""
+    repo = _repo(tmp_path)
+    _insert(repo, ticker="444444", status="CLOSED", exit_at=None)
+    assert repo.get_tickers_closed_today(today=datetime(2026, 8, 13).date()) == set()
