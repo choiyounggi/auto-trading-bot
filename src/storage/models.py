@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    event,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
@@ -158,9 +159,21 @@ class SystemEvent(Base):
 
 
 def get_engine(db_path: Path | str = "data/trades.sqlite"):
-    """SQLite 엔진 + WAL + 외래키 활성."""
+    """SQLite 엔진 — WAL(1회) + busy_timeout/외래키(커넥션마다)."""
     p = Path(db_path).expanduser()
-    return create_engine(f"sqlite:///{p}", future=True)
+    engine = create_engine(f"sqlite:///{p}", future=True)
+
+    @event.listens_for(engine, "connect")
+    def _pragmas(dbapi_conn, _record):
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA busy_timeout=5000")
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
+    with engine.connect() as c:
+        c.exec_driver_sql("PRAGMA journal_mode=WAL")
+        c.exec_driver_sql("PRAGMA synchronous=NORMAL")
+    return engine
 
 
 def get_session_factory(engine):
