@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -31,6 +32,31 @@ from src.storage.models import (
 )
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ClosedTrade:
+    id: int
+    ticker: str
+    name: str
+    qty: int
+    entry_price: int
+    exit_price: int
+    pnl_won: int
+    pnl_pct: float
+    exit_reason: str
+    entry_at: datetime | None
+    exit_at: datetime | None
+    strategy_id: str | None
+
+
+@dataclass(frozen=True)
+class HistorySummary:
+    trades: int
+    wins: int
+    losses: int
+    win_rate_pct: float
+    total_pnl_won: int
 
 
 class Repo:
@@ -263,6 +289,50 @@ class Repo:
                 )
             )
             s.commit()
+
+    def get_closed_positions(self, limit: int = 10) -> list[ClosedTrade]:
+        """최근 청산 포지션 (exit_at 최신순). limit 은 1~50 으로 clamp."""
+        n = max(1, min(int(limit), 50))
+        with self.SessionLocal() as s:
+            rows = s.execute(
+                select(Position)
+                .where(Position.status == "CLOSED")
+                .order_by(Position.exit_at.desc(), Position.id.desc())
+                .limit(n)
+            ).scalars()
+            return [
+                ClosedTrade(
+                    id=p.id,
+                    ticker=p.ticker,
+                    name=p.name,
+                    qty=p.entry_qty or 0,
+                    entry_price=p.entry_price_actual or p.entry_price_target or 0,
+                    exit_price=p.exit_price or 0,
+                    pnl_won=p.pnl_won or 0,
+                    pnl_pct=p.pnl_pct or 0.0,
+                    exit_reason=p.exit_reason or "",
+                    entry_at=p.entry_at,
+                    exit_at=p.exit_at,
+                    strategy_id=p.entry_strategy_id,
+                )
+                for p in rows
+            ]
+
+    def get_history_summary(self, limit: int = 10) -> HistorySummary:
+        """get_closed_positions와 같은 구간(같은 clamp·정렬)의 승률·누적손익 요약."""
+        trades = self.get_closed_positions(limit)
+        wins = sum(1 for t in trades if t.pnl_won > 0)
+        losses = sum(1 for t in trades if t.pnl_won < 0)
+        total = len(trades)
+        win_rate_pct = (wins / total * 100) if total else 0.0
+        total_pnl_won = sum(t.pnl_won for t in trades)
+        return HistorySummary(
+            trades=total,
+            wins=wins,
+            losses=losses,
+            win_rate_pct=win_rate_pct,
+            total_pnl_won=total_pnl_won,
+        )
 
     def is_duplicate(self, ticker: str) -> bool:
         with self.SessionLocal() as s:
