@@ -9,8 +9,8 @@
 guardrails:
   # 비중 — [사이징 확대 2026-07-06] 종목당 30~45만원이 너무 소액이라 표준 상향
   # (영기 확정: 종목당 150~300만원 목표, 시드 3,000만 기준)
-  max_size_pct: 10.0       # [사이징 확대] 3.0 → 10.0 (~300만원)
-  min_size_pct: 3.0        # [사이징 확대] 0.5 → 3.0 — BUY면 최소 ~90만원 (clamp가 하한 승격)
+  max_size_pct: 15.0       # [적극 투입] 10.0 → 15.0
+  min_size_pct: 5.0        # [적극 투입] 3.0 → 5.0
 
   # 손절 — ATR 기반 동적, clamp 범위
   min_stop_loss_pct: 1.5
@@ -22,8 +22,8 @@ guardrails:
 
   # 보유 / 동시성
   max_hold_days: 5
-  max_position_count: 12   # [공격적] 5 → 12 (동시 보유 확대)
-  max_daily_entries: 8     # [공격적] 2 → 8 (일일 신규 진입 확대)
+  max_position_count: 18   # [적극 투입] 12 → 18
+  max_daily_entries: 12    # [적극 투입] 8 → 12
 
   # 신뢰도 임계 — [공격적] 8 → 5 (config + prompt 동시 완화해야 실효)
   min_confidence: 5
@@ -74,31 +74,31 @@ entry:
 strategy_budgets:
   flow_momentum:
     enabled: true
-    max_daily_entries: 2
+    max_daily_entries: 3
     max_hold_days: 5
   price_momentum:
     enabled: true
-    max_daily_entries: 2
+    max_daily_entries: 3
     max_hold_days: 5
   short_cover:
     enabled: true
-    max_daily_entries: 2
+    max_daily_entries: 3
     max_hold_days: 3
   turtle_breakout:
     enabled: true
-    max_daily_entries: 2
+    max_daily_entries: 3
     max_hold_days: 15
   us_breakout_55:
     enabled: true
-    max_daily_entries: 2
+    max_daily_entries: 3
     max_hold_days: 20
   us_breakout_20:
     enabled: true
-    max_daily_entries: 2
+    max_daily_entries: 3
     max_hold_days: 10
   us_relative_momentum:
     enabled: true
-    max_daily_entries: 2
+    max_daily_entries: 3
     max_hold_days: 10
   value_quality:
     enabled: true
@@ -186,6 +186,10 @@ capital:
   phase: 3
   paper_capital_won: 30_000_000
   real_capital_won: 0
+  # [적극 투입 2026-08-12] 총자산 대비 목표 투자 비중. cash_buffer_pct 는
+  # 주문 거부·수수료·부분체결 여유로 남기는 현금 비중.
+  target_utilization_pct: 90.0
+  cash_buffer_pct: 10.0
 
 # ============================================================
 # 해외주식 — KIS paper 해외주식 주문 경로
@@ -207,6 +211,15 @@ paper_probe:
     - turtle_breakout
   asset_classes:
     - overseas_stock
+
+# 장중 현금 재배치 — 청산으로 회수된 현금을 같은 날 다시 투입한다.
+# 아침 진입(guardrails.max_daily_entries)과 예산 카운터가 분리되어 있다.
+cash_deploy:
+  enabled: true
+  max_daily_entries: 6         # 재배치 전용 일일 진입 상한
+  max_candidates_per_run: 4    # 틱당 LLM 평가 상한 (4×180s=12분 < 락 15분 < 간격 30분)
+  min_deploy_won: 500_000      # 미달분이 이보다 작으면 발주하지 않음 (잔돈 주문 방지)
+  underrun_warn_pct: 70.0      # 가동률이 이 아래면 하루 1회 경고
 
 # ============================================================
 # 지수 ETF 단계적 줄줗 (dip-buy) — 2026-06-29

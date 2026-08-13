@@ -25,6 +25,17 @@ class TradingRules:
     max_tp_raises: int = 3
     risk_per_trade_pct: float = 0.25  # 초기 손절까지 계좌/현금 기준 허용 손실률
 
+    # 적극 투입 — 총자산 대비 목표 가동률
+    target_utilization_pct: float = 90.0
+    cash_buffer_pct: float = 10.0
+
+    # 장중 현금 재배치
+    cash_deploy_enabled: bool = True
+    cash_deploy_max_daily_entries: int = 6
+    cash_deploy_max_candidates_per_run: int = 4
+    cash_deploy_min_deploy_won: int = 500_000
+    cash_deploy_underrun_warn_pct: float = 70.0
+
     # 부분 익절 — TP 1차 도달 시 일부 매도로 실익 확보, 잔여분은 연장 TP로 운용
     partial_tp_enabled: bool = True
     partial_tp_sell_pct: float = 50.0       # 1차 도달 시 매도 비율 (%)
@@ -102,6 +113,8 @@ def load_rules(path: Path | str = "config/trading_rules.yaml") -> TradingRules:
     ov = raw.get("overseas", {})
     pp = raw.get("paper_probe", {})
     ptp = raw.get("take_profit_partial", {})
+    cap = raw.get("capital", {})
+    cd = raw.get("cash_deploy", {})
 
     return TradingRules(
         max_size_pct=g.get("max_size_pct", 5.0),
@@ -118,6 +131,13 @@ def load_rules(path: Path | str = "config/trading_rules.yaml") -> TradingRules:
         close_now_min_confidence=g.get("close_now_min_confidence", 8),
         max_tp_raises=g.get("max_tp_raises", 3),
         risk_per_trade_pct=g.get("risk_per_trade_pct", 0.25),
+        target_utilization_pct=cap.get("target_utilization_pct", 90.0),
+        cash_buffer_pct=cap.get("cash_buffer_pct", 10.0),
+        cash_deploy_enabled=cd.get("enabled", True),
+        cash_deploy_max_daily_entries=cd.get("max_daily_entries", 6),
+        cash_deploy_max_candidates_per_run=cd.get("max_candidates_per_run", 4),
+        cash_deploy_min_deploy_won=cd.get("min_deploy_won", 500_000),
+        cash_deploy_underrun_warn_pct=cd.get("underrun_warn_pct", 70.0),
         partial_tp_enabled=ptp.get("enabled", True),
         partial_tp_sell_pct=ptp.get("sell_pct", 50.0),
         partial_tp_extension=ptp.get("extension", 0.5),

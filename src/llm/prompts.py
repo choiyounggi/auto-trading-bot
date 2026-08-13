@@ -30,19 +30,22 @@ ENTRY_PROMPT_TEMPLATE = """\
 {news_block}
 
 [계좌 상태]
-국내 가용 자본: {cash_won:,} 원
+총자산(예수금+평가): {total_asset_won:,} 원
+현재 투자중: {invested_won:,} 원 (가동률 {utilization_pct:.1f}% / 목표 {target_utilization_pct:.0f}%)
+이번 배치 가능액: {deployable_won:,} 원
 보유 종목 수: {open_positions}/{max_positions}
 오늘 누적 PnL: {daily_pnl_pct:+.2f}%
 
 [운영 룰 — 절대 준수]
 - 일반 후보는 최소 confidence 5.0/10. 그 미만은 SKIP. 단, paper_probe 대상(turtle_breakout 또는 asset_class=overseas_stock)은 confidence 7.5 이상이면 소액 probe BUY 가능.
-- size_pct 권장: 5~10% (단일 수급 팩터 과노출 금지. 확신 보통=5~7%, high-conviction=8~10%).
-  - clamp 범위 3~10%. 확신이 보통이어도 BUY 가능(근거가 명백히 약할 때만 SKIP). paper_probe 대상은 0.5~1.0% 소액 진입 허용.
-  - high-conviction이어도 10% 초과 금지. paper_probe 대상은 코드가 1% 이하로 다시 줄인다. 여러 종목이 같은 수급/시장 팩터에 묶일 수 있음을 고려.
+- size_pct 권장: 8~15% (총자산 대비 비율이다. 확신 보통=8~11%, high-conviction=12~15%).
+  - clamp 범위 5~15%. 확신이 보통이어도 BUY 가능(근거가 명백히 약할 때만 SKIP). paper_probe 대상은 0.5~1.0% 소액 진입 허용.
+  - high-conviction이어도 15% 초과 금지. paper_probe 대상은 코드가 1% 이하로 다시 줄인다. 여러 종목이 같은 수급/시장 팩터에 묶일 수 있음을 고려.
 - 너는 전략 생성자가 아니라 리스크 veto 담당이다. 주어진 전략의 근거가 약하거나 뉴스/거시/품질 리스크가 명백하면 SKIP.
 - 해외주식(asset_class=overseas_stock)은 전략 features의 currency/price_scale/broker_symbol을 확인하라. 가격은 코드가 신호 종가 기반 minor unit(예: USD cent)으로 보정하므로, LLM은 BUY/SKIP 리스크 판단에 집중한다.
 - 해외주식 features에 normal_take_profit_pct/price_zscore_20d/daily_return_zscore_60d가 있으면 이를 우선 신뢰한다. 정규분포 기반 목표는 보수적 익절용이며, z-score tail 과열 후보는 SKIP 성향으로 판단한다.
 - 실제 주문 수량은 코드가 `초기 손절까지의 계좌 리스크 한도`로 다시 줄인다. 리스크를 키우려고 size_pct를 높이지 말 것.
+- 계좌에 남은 배치 가능액을 코드가 상한으로 적용한다. 가동률을 채우려고 size_pct를 부풀리지 말 것.
 - stop_loss_pct: 최소 1.5%, 최대 3.0% (clamp). turtle_breakout은 코드가 ATR20×2 기반으로 보정하므로 LLM이 손절폭을 넓히려 하지 말 것.
 - take_profit_pct: 최소 2.0%, 최대 10.0% (clamp). turtle_breakout은 고정 TP보다 추세 지속이 핵심이므로 명백한 리스크가 없으면 SKIP 대신 BUY 유지 여부만 판단.
 - max_hold_days: 기본 5 영업일, turtle_breakout은 코드가 최대 15영업일로 보정 가능.
@@ -57,7 +60,7 @@ ENTRY_PROMPT_TEMPLATE = """\
   "action": "BUY" 또는 "SKIP",
   "entry_strategy": "MARKET_OPEN" (익일 시가) 또는 "LIMIT_TODAY_AFTER_HOURS" (오늘 시간외 단일가),
   "entry_price": <국내는 정수 원, 해외는 신호 가격 기준 정수 minor unit>,
-  "size_pct": <3.0~10.0>,
+  "size_pct": <5.0~15.0>,
   "stop_loss_pct": <0.5~10.0>,
   "take_profit_pct": <0.5~20.0>,
   "max_hold_days": <1~15>,
