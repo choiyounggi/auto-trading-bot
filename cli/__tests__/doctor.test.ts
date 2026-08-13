@@ -54,6 +54,7 @@ function cfg(over: Partial<Config> = {}): Config {
       monitor: true,
       reconciler: true,
       dipBuy: true,
+      cashDeploy: true,
       usOrchestrator: true,
     signalKr: true,
     signalUs: true,
@@ -880,6 +881,7 @@ test("a disabled job that is absent is only a warn", () => {
           monitor: true,
           reconciler: true,
           dipBuy: false,
+          cashDeploy: true,
           usOrchestrator: true,
     signalKr: true,
     signalUs: true,
@@ -920,11 +922,11 @@ test("every job key gets its own check", () => {
   );
 });
 
-test("the job loop covers all eight jobs, including the telegram agent", () => {
+test("the job loop covers all nine jobs, including the telegram agent", () => {
   const checks = runDoctor(healthy());
   const names = checks.filter((c) => c.name.startsWith("job:")).map((c) => c.name);
-  assert.equal(JOB_KEYS.length, 8);
-  assert.equal(names.length, 8);
+  assert.equal(JOB_KEYS.length, 9);
+  assert.equal(names.length, 9);
   assert.ok(names.includes("job:signalKr"), names.join(","));
   assert.ok(names.includes("job:signalUs"), names.join(","));
   assert.ok(names.includes("job:telegramAgent"), names.join(","));

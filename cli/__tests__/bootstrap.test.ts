@@ -80,6 +80,7 @@ function cfgFor(projectDir: string, stateDir: string, pythonPath = PYTHON): Conf
       monitor: true,
       reconciler: true,
       dipBuy: true,
+      cashDeploy: true,
       usOrchestrator: true,
       signalKr: true,
       signalUs: true,

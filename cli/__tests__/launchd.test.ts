@@ -57,6 +57,7 @@ const CFG: Config = {
     monitor: true,
     reconciler: true,
     dipBuy: true,
+    cashDeploy: true,
     usOrchestrator: true,
     signalKr: true,
     signalUs: true,
@@ -231,7 +232,7 @@ test("EVERY job's interpreter is the venv python under stateDir, never the bare 
 });
 
 test("the guarded jobs run the venv interpreter inside their sh script too", () => {
-  for (const job of ["signalKr", "signalUs"] as const) {
+  for (const job of ["signalKr", "signalUs", "cashDeploy"] as const) {
     const script = guardScript(job, CFG, HOME_STR);
     assert.ok(script.includes(VENV_PY), `${job}'s guard must invoke the venv interpreter`);
     assert.equal(
@@ -764,18 +765,19 @@ test("the guard uses only tools that ship with macOS", () => {
   // Measured on a stock Mac: /usr/bin/flock and /usr/bin/timeout do not exist,
   // and the Homebrew timeout is only present where coreutils was installed —
   // which a package shipped to arbitrary Macs cannot assume.
-  for (const job of ["signalKr", "signalUs"] as const) {
+  for (const job of ["signalKr", "signalUs", "cashDeploy"] as const) {
     const script = guardScript(job, CFG, HOME_STR);
     assert.doesNotMatch(script, /flock/, `${job} must not depend on flock`);
     assert.doesNotMatch(script, /timeout/, `${job} must not depend on timeout`);
   }
 });
 
-test("only the two signal jobs are guarded; every other job keeps a direct argv", () => {
+test("only the guarded jobs run under sh; every other job keeps a direct argv", () => {
   const guardedSeen: string[] = [];
+  const guardedJobs = new Set(["signalKr", "signalUs", "cashDeploy"]);
   for (const job of JOB_KEYS) {
     const xml = renderPlist(job, CFG, HOME_STR, "tester");
-    const guarded = job === "signalKr" || job === "signalUs";
+    const guarded = guardedJobs.has(job);
     assert.equal(
       xml.includes("<string>/bin/sh</string>"),
       guarded,
@@ -784,8 +786,9 @@ test("only the two signal jobs are guarded; every other job keeps a direct argv"
     if (guarded) guardedSeen.push(job);
     else assert.ok(xml.includes(`<string>${VENV_PY}</string>`), `${job} calls python directly`);
   }
-  // Stated as a whole-set assertion so a third guarded job cannot slip in.
-  assert.deepEqual(guardedSeen, ["signalKr", "signalUs"]);
+  // Stated as a whole-set assertion so a fourth guarded job cannot slip in.
+  // JOB_KEYS order puts cashDeploy ahead of the two signal jobs.
+  assert.deepEqual(guardedSeen, ["cashDeploy", "signalKr", "signalUs"]);
 });
 
 test("every job, including the new two, renders a plist plutil accepts", () => {
@@ -805,7 +808,7 @@ test("the guard does not exec — exec would discard the trap and orphan the loc
   // fires, and a *successful* run leaves its lock directory behind. The job
   // then only starts again once the staleness window has passed, which for a
   // job scheduled twice an hour would silently drop runs.
-  for (const job of ["signalKr", "signalUs"] as const) {
+  for (const job of ["signalKr", "signalUs", "cashDeploy"] as const) {
     const script = guardScript(job, CFG, HOME_STR);
     assert.doesNotMatch(script, /\bexec\b/, `${job}'s guard must not exec`);
     // The trap must still be there, and before the command it protects.
@@ -925,5 +928,62 @@ test("guard: the job's own exit status survives the wrapper", () => {
     existsSync(lockPath("signalKr", home)),
     false,
     "a failing run still releases its lock",
+  );
+});
+
+// ── cashDeploy: 30-minute intraday redeployment ─────────────────────────
+
+test("cashDeploy runs 12 times per weekday, 09:30 to 15:00 — 5 x 12 = 60", () => {
+  const xml = renderPlist("cashDeploy", CFG, HOME_STR, "tester");
+  assert.equal(weekdayCount(xml), 60);
+  assertParses(xml);
+});
+
+test("cashDeploy's first slot is 09:30 and its last is 15:00 — off-by-one guard", () => {
+  const xml = renderPlist("cashDeploy", CFG, HOME_STR, "tester");
+  assert.match(
+    xml,
+    /<key>Hour<\/key><integer>9<\/integer><key>Minute<\/key><integer>30<\/integer>/,
+  );
+  assert.match(
+    xml,
+    /<key>Hour<\/key><integer>15<\/integer><key>Minute<\/key><integer>0<\/integer>/,
+  );
+  assert.doesNotMatch(
+    xml,
+    /<key>Hour<\/key><integer>9<\/integer><key>Minute<\/key><integer>0<\/integer>/,
+    "09:00 must not be scheduled — the first slot is 09:30",
+  );
+  assert.doesNotMatch(
+    xml,
+    /<key>Hour<\/key><integer>15<\/integer><key>Minute<\/key><integer>30<\/integer>/,
+    "15:30 must not be scheduled — the last slot is 15:00",
+  );
+});
+
+test("cashDeploy is guarded — ProgramArguments starts with /bin/sh -c", () => {
+  const xml = renderPlist("cashDeploy", CFG, HOME_STR, "tester");
+  assert.equal(JOBS.cashDeploy.guarded, true);
+  assert.match(
+    xml,
+    /<key>ProgramArguments<\/key>\n {2}<array>\n {4}<string>\/bin\/sh<\/string>\n {4}<string>-c<\/string>\n/,
+  );
+});
+
+test("cashDeploy's fixed string contract: --deploy-cash, cashDeploy.log, cashDeploy.lock", () => {
+  assert.deepEqual(JOBS.cashDeploy.args, ["-m", "src.orchestrator", "--deploy-cash"]);
+  assert.equal(JOBS.cashDeploy.log, "cashDeploy.log");
+
+  const xml = renderPlist("cashDeploy", CFG, HOME_STR, "tester");
+  // Guarded jobs wrap the argv in a single `sh -c` string (see guardScript),
+  // so `--deploy-cash` shows up shell-quoted inside that string rather than
+  // as its own `<string>` element.
+  assert.ok(xml.includes("--deploy-cash"));
+  assert.ok(xml.includes(`${HOME_STR}/logs/cashDeploy.log`));
+  assert.ok(xml.includes(`${HOME_STR}/logs/cashDeploy.err.log`));
+
+  assert.equal(lockPath("cashDeploy", HOME_STR), `${HOME_STR}/locks/cashDeploy.lock`);
+  assert.ok(
+    guardScript("cashDeploy", CFG, HOME_STR).includes(lockPath("cashDeploy", HOME_STR)),
   );
 });

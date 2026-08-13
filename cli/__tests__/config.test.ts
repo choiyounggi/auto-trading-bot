@@ -15,13 +15,14 @@ import {
   type Config,
 } from "../config.js";
 
-/** The eight jobs, all enabled — the shape `parseConfig` defaults to. */
+/** The nine jobs, all enabled — the shape `parseConfig` defaults to. */
 function allJobs(): Record<string, boolean> {
   return {
     orchestrator: true,
     monitor: true,
     reconciler: true,
     dipBuy: true,
+    cashDeploy: true,
     usOrchestrator: true,
     signalKr: true,
     signalUs: true,
@@ -188,6 +189,10 @@ test("a non-boolean job value is rejected by name", () => {
   assert.deepEqual(errorsOf({ ...validRaw(), jobs: { signalUs: 1 } }), [
     "jobs.signalUs must be a boolean",
   ]);
+  // cashDeploy is the newest key — same exactly-one-error contract applies.
+  assert.deepEqual(errorsOf({ ...validRaw(), jobs: { cashDeploy: "yes" } }), [
+    "jobs.cashDeploy must be a boolean",
+  ]);
 });
 
 test("loadConfig on a directory with no config.json points the user at init", () => {
@@ -293,6 +298,7 @@ test("saveConfig writes mode 0600 and round-trips through loadConfig", () => {
         monitor: false,
         reconciler: true,
         dipBuy: false,
+        cashDeploy: true,
         usOrchestrator: false,
         signalKr: true,
         signalUs: false,
@@ -368,28 +374,52 @@ test("partially specified jobs default the unlisted keys to true", () => {
     signalKr: false,
     signalUs: false,
   });
+
+  // cashDeploy off must not disturb the other eight, same as any other key.
+  const noCashDeploy = parseConfig({ ...validRaw(), jobs: { cashDeploy: false } });
+  assert.equal(noCashDeploy.ok, true);
+  if (!noCashDeploy.ok) return;
+  assert.equal(noCashDeploy.value.jobs.cashDeploy, false);
+  assert.deepEqual(noCashDeploy.value.jobs, { ...allJobs(), cashDeploy: false });
 });
 
-test("omitting jobs enables all eight, including both signal jobs and the daemon", () => {
+test("an explicit empty jobs object still defaults all nine to true", () => {
+  const r = parseConfig({ ...validRaw(), jobs: {} });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.deepEqual(r.value.jobs, allJobs());
+});
+
+test("an explicitly undefined job value falls through to its default", () => {
+  const r = parseConfig({ ...validRaw(), jobs: { cashDeploy: undefined } });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.value.jobs.cashDeploy, true);
+  assert.deepEqual(r.value.jobs, allJobs());
+});
+
+test("omitting jobs enables all nine, including both signal jobs and the daemon", () => {
   const r = parseConfig(validRaw());
   assert.equal(r.ok, true);
   if (!r.ok) return;
   assert.deepEqual(r.value.jobs, allJobs());
-  assert.equal(Object.keys(r.value.jobs).length, 8);
+  assert.equal(Object.keys(r.value.jobs).length, 9);
 });
 
-test("JOB_KEYS is the whole eight-job inventory, in declared order", () => {
-  assert.equal(JOB_KEYS.length, 8, `JOB_KEYS drifted: ${JOB_KEYS.join(", ")}`);
+test("JOB_KEYS is the whole nine-job inventory, in declared order", () => {
+  assert.equal(JOB_KEYS.length, 9, `JOB_KEYS drifted: ${JOB_KEYS.join(", ")}`);
   // These names are a contract with the launchd job table — renaming any one
   // here silently unpairs a job from its schedule.
   assert.ok(JOB_KEYS.includes("signalKr"), JOB_KEYS.join(", "));
   assert.ok(JOB_KEYS.includes("signalUs"), JOB_KEYS.join(", "));
   assert.ok(JOB_KEYS.includes("telegramAgent"), JOB_KEYS.join(", "));
+  assert.ok(JOB_KEYS.includes("cashDeploy"), JOB_KEYS.join(", "));
   assert.deepEqual([...JOB_KEYS], [
     "orchestrator",
     "monitor",
     "reconciler",
     "dipBuy",
+    "cashDeploy",
     "usOrchestrator",
     "signalKr",
     "signalUs",
