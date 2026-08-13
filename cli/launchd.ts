@@ -109,14 +109,23 @@ export interface JobSpec {
 }
 
 /**
- * Reallocation check times — weekdays 09:30 through 15:00, every 30 minutes,
- * 12 times.
+ * Reallocation check times — weekdays 09:30 through 14:30, every 30 minutes,
+ * 11 times.
  *
- * After the 09:05 entry job has finished, up to just before the regular
- * session closes (15:30). Paper fills only happen during the regular
- * session, so no time after it is scheduled.
+ * After the 09:05 entry job has finished, up to one slot before the regular
+ * session closes (15:30). Paper fills only happen during the regular session,
+ * so no time after it is scheduled.
+ *
+ * 15:00 is deliberately absent: `dipBuy` already fires then, and both jobs
+ * spend from the same cash. Each is independently capped by the broker's
+ * buying power, so the collision costs a rejected order rather than
+ * over-exposure — but a rejection is noise, and the 15:00 slot is the one
+ * with the least to lose. Its orders would have 30 minutes to fill, and the
+ * 14:30 slot already covers late-session redeployment. `dipBuy`'s 15:00 is
+ * fixed by its own design (paper fills need the regular session), so this is
+ * the side that moves.
  */
-const CASH_DEPLOY_TIMES = Array.from({ length: 12 }, (_, i) => {
+const CASH_DEPLOY_TIMES = Array.from({ length: 11 }, (_, i) => {
   const minutes = 9 * 60 + 30 + i * 30;
   return { hour: Math.floor(minutes / 60), minute: minutes % 60 };
 });

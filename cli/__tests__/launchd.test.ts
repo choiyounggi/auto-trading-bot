@@ -933,13 +933,13 @@ test("guard: the job's own exit status survives the wrapper", () => {
 
 // ── cashDeploy: 30-minute intraday redeployment ─────────────────────────
 
-test("cashDeploy runs 12 times per weekday, 09:30 to 15:00 — 5 x 12 = 60", () => {
+test("cashDeploy runs 11 times per weekday, 09:30 to 14:30 — 5 x 11 = 55", () => {
   const xml = renderPlist("cashDeploy", CFG, HOME_STR, "tester");
-  assert.equal(weekdayCount(xml), 60);
+  assert.equal(weekdayCount(xml), 55);
   assertParses(xml);
 });
 
-test("cashDeploy's first slot is 09:30 and its last is 15:00 — off-by-one guard", () => {
+test("cashDeploy's first slot is 09:30 and its last is 14:30 — off-by-one guard", () => {
   const xml = renderPlist("cashDeploy", CFG, HOME_STR, "tester");
   assert.match(
     xml,
@@ -947,7 +947,7 @@ test("cashDeploy's first slot is 09:30 and its last is 15:00 — off-by-one guar
   );
   assert.match(
     xml,
-    /<key>Hour<\/key><integer>15<\/integer><key>Minute<\/key><integer>0<\/integer>/,
+    /<key>Hour<\/key><integer>14<\/integer><key>Minute<\/key><integer>30<\/integer>/,
   );
   assert.doesNotMatch(
     xml,
@@ -957,7 +957,21 @@ test("cashDeploy's first slot is 09:30 and its last is 15:00 — off-by-one guar
   assert.doesNotMatch(
     xml,
     /<key>Hour<\/key><integer>15<\/integer><key>Minute<\/key><integer>30<\/integer>/,
-    "15:30 must not be scheduled — the last slot is 15:00",
+    "15:30 must not be scheduled — the last slot is 14:30",
+  );
+});
+
+test("cashDeploy does not share 15:00 with dipBuy — both would spend the same cash", () => {
+  const cash = renderPlist("cashDeploy", CFG, HOME_STR, "tester");
+  const dip = renderPlist("dipBuy", CFG, HOME_STR, "tester");
+  const fifteenHundred = /<key>Hour<\/key><integer>15<\/integer><key>Minute<\/key><integer>0<\/integer>/;
+
+  // dipBuy owns 15:00 — its paper fills need the regular session, so it cannot move.
+  assert.match(dip, fifteenHundred);
+  assert.doesNotMatch(
+    cash,
+    fifteenHundred,
+    "cashDeploy must not fire at 15:00: dipBuy already does, and a collision costs a rejected order",
   );
 });
 
