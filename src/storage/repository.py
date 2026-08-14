@@ -119,12 +119,31 @@ class Repo:
             return pos.id
 
     def mark_filled(self, position_id: int, actual_price: int) -> None:
-        """체결 확정 시 PENDING → OPEN. entry_price_actual 기록."""
+        """체결 확정 시 PENDING → OPEN. entry_price_actual 기록.
+
+        SL/TP는 발주 전 기준가(entry_price_target)로 산출된 절대가라, 시장가
+        체결이 기준가와 어긋나면 체결가 대비 익절 폭이 왜곡된다 (2026-08-13/14
+        +0.06%~+0.42% 극소익 익절 사례). 목표가 대비 비율을 보존해 체결가
+        기준으로 재고정한다. 단위 무관(국내 원 / 해외 minor unit) 비율 연산.
+        """
         with self.SessionLocal() as s:
+            pos = s.get(Position, position_id)
+            if pos is None:
+                return
+            values: dict = {
+                "status": "OPEN",
+                "entry_price_actual": actual_price,
+                "updated_at": datetime.now(),
+            }
+            target = pos.entry_price_target or 0
+            if actual_price > 0 and target > 0 and actual_price != target:
+                ratio = actual_price / target
+                if pos.current_stop_loss:
+                    values["current_stop_loss"] = int(round(pos.current_stop_loss * ratio))
+                if pos.current_take_profit:
+                    values["current_take_profit"] = int(round(pos.current_take_profit * ratio))
             s.execute(
-                update(Position)
-                .where(Position.id == position_id)
-                .values(status="OPEN", entry_price_actual=actual_price, updated_at=datetime.now())
+                update(Position).where(Position.id == position_id).values(**values)
             )
             s.commit()
 
