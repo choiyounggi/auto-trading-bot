@@ -146,7 +146,30 @@ def test_get_balance_non_rate_limit_error_is_not_retried(monkeypatch, tmp_path):
     assert slept == []
 
 
-def test_get_balance_network_error_returns_none_without_retry(monkeypatch, tmp_path):
+def test_get_balance_network_error_retries_then_succeeds(monkeypatch, tmp_path):
+    """2026-08 실측: VTS가 정각 배치 시간대에 read timeout(10s)을 자주 냄 —
+    일시 네트워크 오류도 스로틀과 같은 백오프 예산으로 재시도한다."""
+    c = _client(monkeypatch, tmp_path)
+    monkeypatch.setattr(c, "_headers", lambda tr_id: {})
+    calls: list[str] = []
+
+    def flaky(url, headers=None, params=None, timeout=None):
+        calls.append(url)
+        if len(calls) == 1:
+            raise requests.Timeout("read timed out")
+        return _Resp(_BALANCE_OK)
+
+    monkeypatch.setattr(kc.requests, "get", flaky)
+    slept: list[float] = []
+
+    b = c.get_balance(sleep=slept.append, rand=lambda: 1.0)
+
+    assert isinstance(b, Balance)
+    assert len(calls) == 2
+    assert slept == [kc.RATE_LIMIT_BASE_SEC]
+
+
+def test_get_balance_network_error_gives_up_after_max_attempts(monkeypatch, tmp_path):
     c = _client(monkeypatch, tmp_path)
     monkeypatch.setattr(c, "_headers", lambda tr_id: {})
     calls: list[str] = []
@@ -160,9 +183,9 @@ def test_get_balance_network_error_returns_none_without_retry(monkeypatch, tmp_p
 
     b = c.get_balance(sleep=slept.append, rand=lambda: 1.0)
 
-    assert b is None            # 네트워크 오류 동작은 기존과 동일 (범위 밖)
-    assert len(calls) == 1
-    assert slept == []
+    assert b is None
+    assert len(calls) == kc.RATE_LIMIT_MAX_ATTEMPTS   # 예산 상한 공유, 무한 재시도 금지
+    assert slept == [0.5, 1.0]                        # 마지막 실패 뒤에는 대기 없음
 
 
 def test_get_balance_empty_output_returns_zeroed_balance(monkeypatch, tmp_path):
@@ -187,6 +210,29 @@ def test_get_balance_missing_msg1_is_not_treated_as_throttle(monkeypatch, tmp_pa
 
     assert b is None
     assert len(calls) == 1
+
+
+# ============================================================
+# 모드별 HTTP timeout — 모의(VTS)는 정각 시간대 응답 지연이 잦아 넉넉히,
+# 실전은 죽은 서버에 오래 매달리지 않게 짧게
+# ============================================================
+
+@pytest.mark.parametrize("mode,expected_timeout", [("paper", 20), ("real", 10)])
+def test_get_balance_passes_mode_specific_http_timeout(monkeypatch, tmp_path, mode, expected_timeout):
+    c = _client(monkeypatch, tmp_path, mode=mode)
+    monkeypatch.setattr(c, "_headers", lambda tr_id: {})
+    seen: list[float] = []
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        seen.append(timeout)
+        return _Resp(_BALANCE_OK)
+
+    monkeypatch.setattr(kc.requests, "get", fake_get)
+
+    b = c.get_balance(sleep=lambda s: None, rand=lambda: 1.0)
+
+    assert isinstance(b, Balance)
+    assert seen == [expected_timeout]
 
 
 # ============================================================

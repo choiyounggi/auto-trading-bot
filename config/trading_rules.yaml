@@ -1,5 +1,6 @@
 # config/trading_rules.yaml — 운영 파라미터
-# [공격적 모드 — paper 거래 활발화, 2026-06-29 적용]
+# [모의=실전 정렬 2026-08-21] paper는 실전 리허설이다 — 실전에서 쓸 수 없는
+# 완화(킬스위치 해제, 레짐 게이트 OFF, 단일표 진입)는 paper에도 두지 않는다.
 # 보수 원본은 trading_rules.yaml.bak-conservative 에 보존.
 # 변경 시 git commit + 1주일 cooldown 후 실거래 반영 (Risk R11).
 
@@ -51,12 +52,13 @@ take_profit_partial:
   breakeven_stop: true
 
 # ============================================================
-# Kill Switch — [공격적] 테스트 중단 최소화로 완화
+# Kill Switch — [모의=실전 2026-08-21] 실전 보호 기준 복원. 8%/15%/12회는
+# 가동 90% 전 종목 -3% 손절이어도 -2.7%라 도달 불가한 장식값이었다.
 # ============================================================
 kill_switch:
-  daily_loss_pct: 8.0         # [공격적] 2.0 → 8.0
-  weekly_loss_pct: 15.0       # [공격적] 5.0 → 15.0
-  consecutive_stop_loss: 12   # [공격적] 5 → 12
+  daily_loss_pct: 2.0         # 계좌 -2% 도달 시 전체 청산 + 매수 잠금
+  weekly_loss_pct: 5.0        # 누적 -5% 시 매수 잠금
+  consecutive_stop_loss: 5    # 연속 손절 5회 시 매수 잠금
   llm_parse_fail_rate: 0.50
   mcp_silence_min: 30
 
@@ -122,7 +124,8 @@ llm:
   claude_bin: /opt/homebrew/bin/claude
   pi_bin: /opt/homebrew/bin/pi
 
-  entry_self_consistency: 1        # [공격적] 3 → 1 (1표면 BUY, 다수결 미달 차단 제거)
+  entry_self_consistency: 3        # [모의=실전 2026-08-21] 3표 다수결 복원 — 단일표
+                                   # 데이터는 실전(다수결)의 성과를 대변하지 못한다
   monitor_self_consistency: 1
 
   timeout_sec_entry: 180
@@ -150,14 +153,13 @@ universe_filter:
   reject_elw: true
 
 # ============================================================
-# Market Regime — [공격적] 사실상 OFF (약세장에도 매수 허용)
-# 극단값으로 두어 게이트가 트리거되지 않게 함. 코드 변경 없이 비활성.
+# Market Regime — [모의=실전 2026-08-21] 게이트 복원 (약세장 추격 매수 차단)
 # ============================================================
 market_regime:
-  block_if_kospi_5d_pct_below: -100.0    # [공격적] -2.0 → -100.0 (비활성)
-  block_if_kosdaq_5d_pct_below: -100.0   # [공격적] -3.0 → -100.0 (비활성)
-  block_if_vix_above: 999.0              # [공격적] 25.0 → 999.0 (비활성)
-  block_if_kospi_1d_pct_below: -100.0    # [공격적] -2.0 → -100.0 (비활성)
+  block_if_kospi_5d_pct_below: -2.0     # KOSPI 5일 누적 -2% 미만 → 차단
+  block_if_kosdaq_5d_pct_below: -3.0    # KOSDAQ 5일 누적 -3% 미만 → 차단
+  block_if_vix_above: 25.0              # VIX > 25 → 위험 회피 레짐
+  block_if_kospi_1d_pct_below: -2.0     # KOSPI 당일 -2% 미만 → 익일 panic day 차단
 
 # ============================================================
 # 데이터 소스

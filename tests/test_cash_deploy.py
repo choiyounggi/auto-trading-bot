@@ -430,6 +430,27 @@ def test_no_candidates_returns_zero_and_warns_once(monkeypatch):
 
     assert n == 0
     assert len(sent_warn) == 1
+    # 신호 자체가 0건이면 "신호 봇 점검"을 지목해야 한다 — 2026-08-14~21 일주일간
+    # 빈 신호 파일 outage가 "신호가 부족한 날" 문구에 가려졌다.
+    assert "신호가 0건" in sent_warn[0]
+
+
+def test_all_candidates_filtered_warns_with_filter_reason(monkeypatch):
+    """경계: 신호는 있는데 전부 보유중/당일청산 제외 — 신호 0건과 다른 문구."""
+    monkeypatch.setattr(entry_mod, "vote_entry", _fake_vote())
+    monkeypatch.setattr("src.orchestrator.cash_deploy._KIS_GAP_SEC", 0)
+
+    repo = FakeRepo(duplicates={"005930"})
+    client = FakeClient(balance=_balance(cash=25_000_000, total_eval=30_000_000), deposit=25_000_000)
+    sent_info, send_info = _noop_send()
+    sent_warn, send_warning = _noop_send()
+
+    n = run_cash_deploy(client, repo, _rules(), [_candidate(ticker="005930")], {}, send_info, send_warning)
+
+    assert n == 0
+    assert len(sent_warn) == 1
+    assert "신호가 0건" not in sent_warn[0]
+    assert "보유중" in sent_warn[0]
 
 
 def test_underrun_warning_sent_only_once_across_two_consecutive_calls(monkeypatch):

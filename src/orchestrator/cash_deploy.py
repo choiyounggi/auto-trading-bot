@@ -125,7 +125,10 @@ def should_warn_underrun(today: str, marker: Path = _WARN_MARKER) -> bool:
         return True
 
 
-def _maybe_warn_underrun(plan, rules: Any, send_warning: Callable[[str], Any]) -> None:
+def _maybe_warn_underrun(plan, rules: Any, send_warning: Callable[[str], Any], detail: str) -> None:
+    """detail: 미달의 실제 원인 한 줄. 2026-08-14~21 신호 봇이 빈 파일을 내는 동안
+    "신호가 부족한 날이야"라는 뭉뚱그린 문구가 일주일짜리 outage를 가렸다 —
+    호출 지점이 아는 원인을 그대로 내보낸다."""
     if plan.utilization_pct >= rules.cash_deploy_underrun_warn_pct:
         return
     # 기본 인자가 아니라 모듈 전역을 직접 참조 — 기본 인자는 def 시점에 바인딩돼
@@ -134,7 +137,7 @@ def _maybe_warn_underrun(plan, rules: Any, send_warning: Callable[[str], Any]) -
         return
     send_warning(
         f"⚠️ 가동률 {plan.utilization_pct:.1f}% (목표 {plan.target_pct:.0f}%) — "
-        f"배치 가능 {plan.deployable_won:,}원인데 진입 후보가 없어. 신호가 부족한 날이야."
+        f"배치 가능 {plan.deployable_won:,}원. {detail}"
     )
 
 
@@ -182,12 +185,18 @@ def run_cash_deploy(
     )
 
     if plan.deployable_won < rules.cash_deploy_min_deploy_won:
-        _maybe_warn_underrun(plan, rules, send_warning)
+        _maybe_warn_underrun(plan, rules, send_warning,
+                             "배치 가능액이 최소 주문 기준 미만이라 이번 틱은 쉬어가.")
         return 0
 
     picked = pick_candidates(candidates, repo, rules.cash_deploy_max_candidates_per_run)
     if not picked:
-        _maybe_warn_underrun(plan, rules, send_warning)
+        if not candidates:
+            _maybe_warn_underrun(plan, rules, send_warning,
+                                 "국내 신호가 0건이야 — 신호 봇/KRX 데이터 소스 점검 필요.")
+        else:
+            _maybe_warn_underrun(plan, rules, send_warning,
+                                 "후보가 전부 보유중·당일청산 제외돼서 진입할 게 없어.")
         return 0
 
     # 실시간 시세를 못 얻은 후보는 낡은 종가로 발주하지 않고 아예 뺀다.
@@ -195,7 +204,8 @@ def run_cash_deploy(
     picked = [c for c in picked if c["ticker"] in quotes]
     if not picked:
         log.warning("재배치: 시세를 얻은 후보가 없어 진입 skip")
-        _maybe_warn_underrun(plan, rules, send_warning)
+        _maybe_warn_underrun(plan, rules, send_warning,
+                             "후보 시세 조회가 전부 실패해서 진입을 건너뛰었어.")
         return 0
 
     # LLM 프롬프트의 시세도 실시간으로 갱신한다 — 판단 근거와 체결 가격이 어긋나면

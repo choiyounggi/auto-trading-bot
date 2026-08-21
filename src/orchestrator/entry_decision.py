@@ -351,6 +351,7 @@ def evaluate_candidate(
         capital = int(float(account.cash_usd or rules.overseas_paper_capital_usd) * scale)
         size_pct = min(float(clamped.size_pct or 0.0), float(rules.overseas_max_size_pct))
         risk_pct = float(rules.overseas_risk_per_trade_pct)
+        max_size_cap_pct = float(rules.overseas_max_size_pct)
         clamped = clamped.model_copy(update={"entry_price": entry_price, "size_pct": size_pct})
     else:
         scale = 1
@@ -367,12 +368,19 @@ def evaluate_candidate(
         capital = account.sizing_base_won      # ← account.cash_won 에서 변경
         size_pct = float(clamped.size_pct or 0.0)
         risk_pct = float(rules.risk_per_trade_pct)
+        max_size_cap_pct = float(rules.max_size_pct)
 
     size_qty = calc_qty(entry_price, capital, size_pct)
     risk_qty = calc_risk_based_qty(entry_price, stop_loss, capital, risk_pct)
     # paper_probe는 거래 샘플 확보가 목적이므로 size cap으로 0주가 되더라도,
     # 1주 매수 가능하고 초기 손절 리스크가 예산 안이면 최소 1주만 허용한다.
     if is_probe and size_qty <= 0 and risk_qty >= 1 and entry_price <= capital:
+        size_qty = 1
+    # 고가 종목 1주 올림 — LLM size_pct 예산으로 0주가 되는 고가 종목도, 1주
+    # 명목가가 max_size_pct 상한 안이고 리스크 수량(risk_qty ≥ 1)이 허용하면
+    # 1주는 산다 (2026-08-13 실측: SK하이닉스 1,504,000원 × size 5% = 예산
+    # 1,503,726원 → qty=0으로 시드 3,000만 계좌가 황제주를 영구 스킵).
+    elif size_qty <= 0 and risk_qty >= 1 and entry_price <= int(capital * max_size_cap_pct / 100.0):
         size_qty = 1
     qty = min(size_qty, risk_qty) if risk_qty > 0 else size_qty
     if budget_won is not None:

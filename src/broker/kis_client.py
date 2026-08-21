@@ -155,6 +155,10 @@ class KisClient:
         # 실측(2026-07-06): 모의서버는 같은 초 창의 2번째 호출도 거부하는 경우가 있어
         # 1.05s로 초 경계를 항상 넘긴다. 넘어도 get_quote 재시도가 안전망.
         self._min_request_interval = 1.05 if self.mode == "paper" else 0.06
+        # HTTP read timeout — 실측(2026-08): 모의(VTS) 서버는 launchd 잡이 몰리는
+        # 정각 시간대에 10초를 자주 넘긴다(read timeout 빈발). 실전 서버는 빠르고
+        # 안정적이라 10초 유지 — 주문 경로가 죽은 서버에 오래 매달리지 않게 한다.
+        self._http_timeout = 20 if self.mode == "paper" else 10
         self._last_request_at = 0.0
         self._load_token_cache()
 
@@ -212,7 +216,7 @@ class KisClient:
                 "appkey": self.app_key,
                 "appsecret": self.app_secret,
             },
-            timeout=10,
+            timeout=self._http_timeout,
         )
         if r.status_code != 200:
             log.warning("token 발급 실패: %d %s", r.status_code, r.text[:300])
@@ -267,9 +271,13 @@ class KisClient:
     def get_balance(self, *, sleep=time.sleep, rand=random.random) -> Balance | None:
         """모의: VTTC8434R / 실전: TTTC8434R.
 
-        일시적 '초당 거래건수 초과'는 full jitter 백오프로 최대
-        RATE_LIMIT_MAX_ATTEMPTS 회까지 재시도한다. 그 외 rt_cd != "0" 과
-        네트워크 오류는 즉시 None (재시도 대상이 아니다).
+        일시적 '초당 거래건수 초과'와 네트워크 오류(read timeout 등)는
+        full jitter 백오프로 최대 RATE_LIMIT_MAX_ATTEMPTS 회까지 재시도한다.
+        그 외 rt_cd != "0" 거절은 즉시 None (재시도 대상이 아니다).
+
+        네트워크 오류를 재시도하는 근거(2026-08 실측): launchd 잡들이 정각에
+        일제히 시작해 VTS 서버가 그 시간대에 read timeout을 자주 냈고, 같은
+        틱 내 재시도만으로 회복 가능한 일시 장애였다.
         """
         tr_id = "VTTC8434R" if self.mode == "paper" else "TTTC8434R"
         params = {
@@ -291,7 +299,7 @@ class KisClient:
                     f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-balance",
                     headers=self._headers(tr_id),
                     params=params,
-                    timeout=10,
+                    timeout=self._http_timeout,
                 )
                 data = r.json()
                 if data.get("rt_cd") != "0":
@@ -322,7 +330,13 @@ class KisClient:
                     raw=data,
                 )
             except requests.RequestException as e:
-                log.warning("get_balance 네트워크 오류: %s", e)
+                if attempt < RATE_LIMIT_MAX_ATTEMPTS - 1:
+                    wait = _rate_limit_backoff(attempt, rand=rand)
+                    log.info("get_balance 네트워크 오류 → %.2fs 후 재시도 (%d/%d): %s",
+                             wait, attempt + 2, RATE_LIMIT_MAX_ATTEMPTS, e)
+                    sleep(wait)
+                    continue
+                log.warning("get_balance 네트워크 오류 (재시도 소진): %s", e)
                 return None
 
     def get_overseas_balance(self, exchange: str = "NASD", currency: str = "USD") -> Balance | None:
@@ -341,7 +355,7 @@ class KisClient:
                 f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-balance",
                 headers=self._headers(tr_id),
                 params=params,
-                timeout=10,
+                timeout=self._http_timeout,
             )
             data = r.json()
             if data.get("rt_cd") != "0":
@@ -414,7 +428,7 @@ class KisClient:
                 f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-psbl-order",
                 headers=self._headers(tr_id),
                 params=params,
-                timeout=10,
+                timeout=self._http_timeout,
             )
             data = r.json()
             if data.get("rt_cd") != "0":
@@ -441,7 +455,7 @@ class KisClient:
                 f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-price",
                 headers=self._headers("FHKST01010100"),
                 params=params,
-                timeout=10,
+                timeout=self._http_timeout,
             )
             data = r.json()
             if data.get("rt_cd") != "0":
@@ -482,7 +496,7 @@ class KisClient:
                 f"{self.base_url}/uapi/overseas-price/v1/quotations/price",
                 headers=self._headers("HHDFS00000300"),
                 params=params,
-                timeout=10,
+                timeout=self._http_timeout,
             )
             data = r.json()
             if data.get("rt_cd") != "0":
@@ -542,7 +556,7 @@ class KisClient:
                 f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-psamount",
                 headers=self._headers(tr_id),
                 params=params,
-                timeout=10,
+                timeout=self._http_timeout,
             )
             data = r.json()
             if data.get("rt_cd") != "0":
@@ -571,7 +585,7 @@ class KisClient:
                 f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
                 headers=self._headers("FHKST03010100"),
                 params=params,
-                timeout=10,
+                timeout=self._http_timeout,
             )
             data = r.json()
             if data.get("rt_cd") != "0":
@@ -657,7 +671,7 @@ class KisClient:
                 f"{self.base_url}/uapi/overseas-stock/v1/trading/order",
                 headers=self._headers(tr_id),
                 json=body,
-                timeout=10,
+                timeout=self._http_timeout,
             )
             data = r.json()
             if data.get("rt_cd") != "0":
@@ -696,7 +710,7 @@ class KisClient:
                 f"{self.base_url}/uapi/domestic-stock/v1/trading/order-cash",
                 headers=self._headers(tr_id),
                 json=body,
-                timeout=10,
+                timeout=self._http_timeout,
             )
             data = r.json()
             if data.get("rt_cd") != "0":
@@ -729,7 +743,7 @@ class KisClient:
                 f"{self.base_url}/uapi/domestic-stock/v1/trading/order-rvsecncl",
                 headers=self._headers(tr_id),
                 json=body,
-                timeout=10,
+                timeout=self._http_timeout,
             )
             return r.json().get("rt_cd") == "0"
         except requests.RequestException as e:
@@ -757,7 +771,7 @@ class KisClient:
                 f"{self.base_url}/uapi/domestic-stock/v1/trading/order-rvsecncl",
                 headers=self._headers(tr_id),
                 json=body,
-                timeout=10,
+                timeout=self._http_timeout,
             )
             return r.json().get("rt_cd") == "0"
         except requests.RequestException as e:

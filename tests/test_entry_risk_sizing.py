@@ -667,3 +667,76 @@ def test_daily_limit_gate_still_blocks_without_quota_override(monkeypatch):
 
     assert plans == []
     assert all(s.reason == "daily_entry_limit" for s in skips)
+
+
+# ============================================================
+# 고가 종목 1주 올림 — size_pct 예산 0주여도 max_size_pct 상한 안이면 1주
+# (2026-08-13 실측: SK하이닉스 1,504,000원 qty=0 스킵)
+# ============================================================
+
+def _expensive_candidate(**overrides) -> dict:
+    base = {
+        "ticker": "000660",
+        "name": "SK하이닉스",
+        "score": 8,
+        "triggers": ["A2:연속 순매수"],
+        "strategy_id": "flow_momentum",
+        "strategy_score": 8,
+        "features": {},
+        "panel_summary": {"last_close": 1_504_000},
+    }
+    base.update(overrides)
+    return base
+
+
+def _rich_account() -> AccountSnapshot:
+    return AccountSnapshot(
+        cash_won=30_000_000, total_asset_won=30_000_000,
+        open_positions=0, daily_pnl_pct=0.0, daily_entries_today=0,
+    )
+
+
+def test_high_priced_ticker_bumps_to_one_share_within_max_size_cap(monkeypatch):
+    """정상: size 5% 예산(150만) < 1주 가격이지만 max_size_pct 15% 상한(450만) 안 → 1주."""
+    def fake_vote(prompt, n, timeout):
+        return _buy_decision(entry_price=1_504_000, size_pct=5.0, stop_loss_pct=2.5), \
+            [{"source": "test", "elapsed_ms": 1, "parse_error": None}]
+
+    monkeypatch.setattr(mod, "vote_entry", fake_vote)
+    rules = TradingRules(max_size_pct=15.0, risk_per_trade_pct=0.5)
+
+    plan, reason = evaluate_candidate(_expensive_candidate(), {}, _rich_account(), rules, repo=None)
+
+    assert reason is None
+    assert plan is not None
+    assert plan.qty == 1
+
+
+def test_high_priced_ticker_still_skipped_when_one_share_exceeds_max_size_cap(monkeypatch):
+    """경계: 1주 가격이 max_size_pct 상한(3% = 90만)을 넘으면 올림 없이 qty=0 스킵."""
+    def fake_vote(prompt, n, timeout):
+        return _buy_decision(entry_price=1_504_000, size_pct=3.0, stop_loss_pct=2.5), \
+            [{"source": "test", "elapsed_ms": 1, "parse_error": None}]
+
+    monkeypatch.setattr(mod, "vote_entry", fake_vote)
+    rules = TradingRules(max_size_pct=3.0, risk_per_trade_pct=0.5)
+
+    plan, reason = evaluate_candidate(_expensive_candidate(), {}, _rich_account(), rules, repo=None)
+
+    assert plan is None
+    assert "qty=0" in reason
+
+
+def test_high_priced_ticker_not_bumped_when_risk_budget_disallows_one_share(monkeypatch):
+    """에러 경로: 리스크 예산(0.05% = 15,000원)이 1주 손절 리스크(약 37,600원)보다 작으면 올림 금지."""
+    def fake_vote(prompt, n, timeout):
+        return _buy_decision(entry_price=1_504_000, size_pct=5.0, stop_loss_pct=2.5), \
+            [{"source": "test", "elapsed_ms": 1, "parse_error": None}]
+
+    monkeypatch.setattr(mod, "vote_entry", fake_vote)
+    rules = TradingRules(max_size_pct=15.0, risk_per_trade_pct=0.05)
+
+    plan, reason = evaluate_candidate(_expensive_candidate(), {}, _rich_account(), rules, repo=None)
+
+    assert plan is None
+    assert "qty=0" in reason
