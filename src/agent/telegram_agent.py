@@ -285,9 +285,17 @@ class Agent:
         self.pending: dict[str, dict] = {}
         self._token_seq = 0
         self.mode = _load_mode()
+        self._kis: KisClient | None = None
 
     def _client(self) -> KisClient:
-        return KisClient(mode=self.mode)
+        """모드별로 하나를 재사용한다.
+
+        매번 새로 만들면 인스턴스 단위 throttle 폴백 상태가 명령마다 리셋된다.
+        모드를 키로 검사하므로 _switch_mode 가 무효화를 따로 부를 필요가 없다.
+        """
+        if self._kis is None or self._kis.mode != self.mode:
+            self._kis = KisClient(mode=self.mode)
+        return self._kis
 
     def _snapshot(self):
         """(domestic Balance|None, overseas Balance|None)."""

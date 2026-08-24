@@ -263,12 +263,15 @@ def test_backoff_default_rand_stays_within_bounds():
 # ============================================================
 
 class _FakeClock:
-    """주입된 단조 시계 — sleep 이 시계를 전진시킨다 (벽시계 의존 없음)."""
+    """주입된 벽시계 — sleep 이 시계를 전진시킨다 (실제 wall time 의존 없음).
+
+    2026-08-24: throttle 상태가 계좌 단위 공유 파일이 되면서 시계가
+    monotonic 에서 벽시계(time.time())로 바뀌었다 — 이 가짜 시계도 맞춘다."""
 
     def __init__(self, start: float = 1000.0):
         self.now = start
 
-    def monotonic(self) -> float:
+    def time(self) -> float:
         return self.now
 
     def sleep(self, seconds: float) -> None:
@@ -284,7 +287,7 @@ def test_token_post_and_balance_get_are_throttled_apart(monkeypatch, tmp_path):
     assert c._token is None      # 토큰 캐시 비어 있음 = 발급 경로
 
     clock = _FakeClock()
-    monkeypatch.setattr(kc.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(kc.time, "time", clock.time)
     monkeypatch.setattr(kc.time, "sleep", clock.sleep)
     c._last_request_at = 0.0
 
@@ -292,11 +295,11 @@ def test_token_post_and_balance_get_are_throttled_apart(monkeypatch, tmp_path):
 
     def fake_post(url, json=None, timeout=None):
         assert url.endswith("/oauth2/tokenP")
-        stamps["token"] = clock.monotonic()
+        stamps["token"] = clock.time()
         return _Resp(_TOKEN_OK)
 
     def fake_get(url, headers=None, params=None, timeout=None):
-        stamps["balance"] = clock.monotonic()
+        stamps["balance"] = clock.time()
         assert headers["authorization"] == "Bearer tok-abc"
         return _Resp(_BALANCE_OK)
 
@@ -320,7 +323,7 @@ def test_token_post_updates_last_request_at(monkeypatch, tmp_path):
     """토큰 POST 자체가 스로틀 타임스탬프를 갱신해야 다음 호출이 띄워진다."""
     c = _client(monkeypatch, tmp_path)
     clock = _FakeClock()
-    monkeypatch.setattr(kc.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(kc.time, "time", clock.time)
     monkeypatch.setattr(kc.time, "sleep", clock.sleep)
     c._last_request_at = 0.0
 
