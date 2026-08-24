@@ -4,11 +4,16 @@
 배경(2026-07-06): ① 모니터 get_quote가 '초당 거래건수 초과'로 실패 →
 ⚠️ 시세 조회 실패 경고 + 해당 사이클 SL/TP 체크 skip.
 ② BUY 알림 본문의 strategy_id 밑줄(_)이 Markdown entity로 오파싱 → 400 → 알림 유실.
+
+2026-08-24 이후 throttle 상태는 계좌 단위 공유 파일(`_throttle_path`)이며
+시계는 벽시계(time.time())다 — 인스턴스 단위 monotonic이 아니다.
 """
 from __future__ import annotations
 
 import time
 
+from src.agent.telegram_agent import Agent
+from src.broker import kis_client as kc
 from src.broker.kis_client import KisClient
 from src.notify import telegram
 
@@ -30,7 +35,7 @@ def test_throttle_sleeps_when_called_back_to_back(monkeypatch):
     c = _client()
     slept = []
     monkeypatch.setattr("src.broker.kis_client.time.sleep", lambda s: slept.append(s))
-    c._last_request_at = time.monotonic()  # 직전에 호출한 상태
+    kc._throttle_path(c.mode, c.cano).write_text(f"{time.time():.6f}", encoding="utf-8")  # 직전에 호출한 상태
     c._throttle()
     assert len(slept) == 1
     assert 0 < slept[0] <= 1.05
@@ -40,7 +45,7 @@ def test_throttle_no_sleep_after_interval(monkeypatch):
     c = _client()
     slept = []
     monkeypatch.setattr("src.broker.kis_client.time.sleep", lambda s: slept.append(s))
-    c._last_request_at = time.monotonic() - 10.0  # 오래 전
+    kc._throttle_path(c.mode, c.cano).write_text(f"{time.time() - 10.0:.6f}", encoding="utf-8")  # 오래 전
     c._throttle()
     assert slept == []
 
@@ -117,6 +122,40 @@ def test_get_quote_non_rate_limit_error_no_retry(monkeypatch):
     q = c.get_quote("000270")
     assert q is None
     assert len(calls) == 1          # rate limit 외 오류는 재시도 없음
+
+
+# ============================================================
+# telegram_agent — 명령 간 KisClient 캐싱 (이슈 완료 기준 5)
+# ============================================================
+
+def _agent(mode: str = "paper") -> Agent:
+    """Repo()/keychain 접근 없이 _client() 만 격리 검증하는 인스턴스."""
+    a = object.__new__(Agent)
+    a.mode = mode
+    a._kis = None
+    return a
+
+
+def test_agent_reuses_the_kis_client_between_commands():
+    a = _agent()
+    assert a._client() is a._client()
+
+
+def test_agent_rebuilds_the_client_after_a_mode_switch():
+    a = _agent()
+    first = a._client()
+    a.mode = "real"
+    second = a._client()
+    assert second is not first
+    assert second.mode == "real"
+
+
+def test_agent_builds_a_client_on_first_use():
+    a = _agent()
+    assert a._kis is None
+    c = a._client()
+    assert isinstance(c, KisClient)
+    assert a._kis is c
 
 
 # ============================================================

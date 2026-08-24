@@ -14,6 +14,7 @@ Token 캐시: ~/.kis-token-{paper|real}.json (24시간 유효, 6시간 이내 �
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -51,6 +52,15 @@ def _base_url(mode: str) -> str:
 
 def _token_cache_path(mode: str) -> Path:
     return Path.home() / f".kis-token-{mode}.json"
+
+
+def _throttle_path(mode: str, cano: str) -> Path:
+    """계좌+모드 단위 호출 간격 공유 파일.
+
+    KIS 의 '초당 거래건수' 제한은 계좌(원장) 단위인데 이 봇은 5개 프로세스에서
+    KisClient 를 만든다. 마지막 호출 시각을 프로세스 밖에 두어야 조율된다.
+    """
+    return Path.home() / f".kis-throttle-{mode}-{cano or 'nocano'}"
 
 
 def _to_float(value, default: float = 0.0) -> float:
@@ -159,7 +169,9 @@ class KisClient:
         # 정각 시간대에 10초를 자주 넘긴다(read timeout 빈발). 실전 서버는 빠르고
         # 안정적이라 10초 유지 — 주문 경로가 죽은 서버에 오래 매달리지 않게 한다.
         self._http_timeout = 20 if self.mode == "paper" else 10
-        self._last_request_at = 0.0
+        # 공유 파일이 없거나 못 쓸 때의 폴백 전용 상태 — 0.0 이면 첫 호출이 대기를
+        # 면제받아 버리므로 벽시계 현재값으로 시작한다.
+        self._last_request_at = time.time()
         self._load_token_cache()
 
     @contextmanager
@@ -241,14 +253,59 @@ class KisClient:
         return self._token
 
     def _throttle(self) -> None:
-        """연속 API 호출 간 최소 간격 보장 — '초당 거래건수 초과' 방지.
+        """계좌 단위 최소 호출 간격 보장 — '초당 거래건수 초과' 방지.
 
-        모든 API 호출이 요청 직전 _headers()를 거치므로 여기서 일괄 적용된다.
+        상태는 프로세스 밖(계좌+모드 단위 파일)에 둔다. KIS 의 제한은 계좌 단위인데
+        tradeorch/cashdeploy/dipbuy/posmonitor/telegram_agent 가 각자 KisClient 를
+        만들기 때문이다. 프로세스 간 비교가 가능해야 하므로 시계는 monotonic 이
+        아니라 벽시계다.
+
+        파일 I/O 가 실패하면 삼키고 인스턴스 단위 동작으로 폴백한다 —
+        throttle 때문에 매매가 멈추면 안 된다.
         """
-        wait = self._min_request_interval - (time.monotonic() - self._last_request_at)
+        interval = self._min_request_interval
+        try:
+            fd = os.open(_throttle_path(self.mode, self.cano), os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError:
+            self._throttle_local(interval)
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)   # sleep 을 감싼 채 유지 — 동시에 깨어난
+                                             # 두 프로세스가 같은 대기값을 계산해
+                                             # 같은 순간에 나가는 것을 막는다
+            try:
+                last = float(os.read(fd, 64).decode("utf-8").strip())
+            except (ValueError, UnicodeDecodeError):
+                last = 0.0          # 빈 파일 / 손상 → 직전 호출 없음으로 취급
+            now = time.time()
+            elapsed = now - last
+            if elapsed < 0:         # NTP 역행 또는 미래 타임스탬프
+                elapsed = 0.0
+            wait = interval - elapsed
+            if wait > 0:
+                time.sleep(min(wait, interval))   # 상한 — 먼 미래 값에 매달리지 않는다
+                now = time.time()
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{now:.6f}".encode("utf-8"))
+            self._last_request_at = now
+        except OSError:
+            self._throttle_local(interval)
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+    def _throttle_local(self, interval: float) -> None:
+        """공유 파일을 쓸 수 없을 때의 폴백 — 인스턴스 단위. 시계는 벽시계로 통일."""
+        elapsed = time.time() - self._last_request_at
+        if elapsed < 0:
+            elapsed = 0.0
+        wait = interval - elapsed
         if wait > 0:
-            time.sleep(wait)
-        self._last_request_at = time.monotonic()
+            time.sleep(min(wait, interval))
+        self._last_request_at = time.time()
 
     def _headers(self, tr_id: str) -> dict:
         # 토큰을 먼저 해결한다. 발급이 일어나면 그 POST 가 _throttle() 을 거치므로
