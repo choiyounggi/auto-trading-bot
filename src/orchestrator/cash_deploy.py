@@ -141,6 +141,24 @@ def _maybe_warn_underrun(plan, rules: Any, send_warning: Callable[[str], Any], d
     )
 
 
+def summarize_skip_reasons(skips: list, limit: int = 3) -> str:
+    """진입 0건일 때 실제 skip 사유를 한 줄로 압축한다. 같은 사유는 건수로 합친다.
+
+    _maybe_warn_underrun 의 detail 규약과 같다 — 뭉뚱그린 문구는 outage 를 가린다.
+    """
+    if not skips:
+        return "진입 계획이 0건인데 skip 사유도 안 나왔어 — select_entries 점검 필요."
+    counts: dict[str, int] = {}
+    for s in skips:
+        reason = (getattr(s, "reason", None) or "사유 불명").strip() or "사유 불명"
+        counts[reason] = counts.get(reason, 0) + 1
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    shown = "; ".join(f"{reason} ({n}건)" for reason, n in ordered[:limit])
+    if len(ordered) > limit:
+        shown += f" 외 {len(ordered) - limit}종"
+    return f"후보를 평가했지만 전부 걸러졌어 — {shown}."
+
+
 def run_cash_deploy(
     client: Any,
     repo: Any,
@@ -232,6 +250,13 @@ def run_cash_deploy(
     log.info("재배치 진입 계획 %d건, skip %d건", len(plans), len(skips))
     for s in skips:
         log.info("  SKIP %s %s: %s", s.ticker, s.name, s.reason)
+
+    # select_entries 가 전부 거른 경우도 "가동률 미달인데 아무것도 안 샀다"는 사실은
+    # 같다. 이 갈래만 경고 없이 return 하고 있었고, 2026-08-24 시장 레짐 차단으로
+    # 11틱(09:30~14:30) 내내 가동률 2.7%인 채 알림이 한 건도 나가지 않았다.
+    if not plans:
+        _maybe_warn_underrun(plan, rules, send_warning, summarize_skip_reasons(skips))
+        return 0
 
     accepted = 0
     for p in plans:
