@@ -12,7 +12,10 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    # 이 패키지는 package.json 에 os: ["darwin"] 을 선언한다(launchd/Keychain 의존).
+    # linux 러너에서는 npm ci 가 루트 패키지의 os 필드를 검사해 EBADPLATFORM 으로
+    # 즉시 실패한다 — 2026-08-24 run 32701968072. 러너를 패키지 플랫폼에 맞춘다.
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
