@@ -20,6 +20,7 @@ from src.orchestrator.cash_deploy import (
     pick_candidates,
     run_cash_deploy,
     should_warn_underrun,
+    summarize_skip_reasons,
 )
 
 
@@ -498,6 +499,107 @@ def test_get_balance_none_returns_zero_and_warns_without_raising():
 
     assert n == 0
     assert len(sent_warn) == 1
+
+
+# ---------------------------------------------------------------------------
+# summarize_skip_reasons / select_entries 가 전부 거른 갈래
+# (2026-08-24 회귀: 시장 레짐 차단으로 11틱 내내 가동률 2.7%인데 무알림)
+# ---------------------------------------------------------------------------
+
+def _skip(ticker="005930", name="삼성전자", reason="market_regime: 약세장"):
+    return SimpleNamespace(ticker=ticker, name=name, reason=reason)
+
+
+def _stub_select_entries(monkeypatch, plans, skips):
+    monkeypatch.setattr(
+        "src.orchestrator.cash_deploy.select_entries",
+        lambda *a, **kw: (plans, skips),
+    )
+
+
+def test_summarize_skip_reasons_groups_identical_reasons_with_counts():
+    detail = summarize_skip_reasons([_skip(), _skip(ticker="028260", name="삼성물산")])
+
+    assert "market_regime: 약세장 (2건)" in detail
+
+
+def test_summarize_skip_reasons_empty_names_the_anomaly():
+    """경계: skip 도 plan 도 0건이면 사유를 지어내지 말고 이상 자체를 지목한다."""
+    detail = summarize_skip_reasons([])
+
+    assert "select_entries 점검" in detail
+
+
+def test_summarize_skip_reasons_blank_reason_falls_back_to_unknown():
+    """경계: reason 이 None/빈 문자열이어도 빈 문구를 내보내지 않는다."""
+    detail = summarize_skip_reasons([_skip(reason=None), _skip(reason="   ")])
+
+    assert "사유 불명 (2건)" in detail
+
+
+def test_summarize_skip_reasons_caps_listed_reasons_and_counts_remainder():
+    """경계: 사유 종류가 limit 을 넘으면 잘라 쓰되 몇 종을 감췄는지 밝힌다."""
+    skips = [_skip(reason=f"reason_{i}") for i in range(5)]
+
+    detail = summarize_skip_reasons(skips, limit=3)
+
+    assert detail.count("reason_") == 3
+    assert "외 2종" in detail
+
+
+def test_all_entries_skipped_warns_underrun_with_real_reason(monkeypatch):
+    """회귀: 후보·시세는 정상인데 select_entries 가 전부 거른 갈래도 경고해야 한다."""
+    monkeypatch.setattr("src.orchestrator.cash_deploy._KIS_GAP_SEC", 0)
+    _stub_select_entries(monkeypatch, plans=[], skips=[_skip(reason="market_regime: KOSDAQ 5일 -6.90%")])
+
+    repo = FakeRepo()
+    client = FakeClient(balance=_balance(cash=25_000_000, total_eval=30_000_000), deposit=25_000_000)
+    sent_info, send_info = _noop_send()
+    sent_warn, send_warning = _noop_send()
+
+    n = run_cash_deploy(client, repo, _rules(), [_candidate()], {}, send_info, send_warning)
+
+    assert n == 0
+    assert len(sent_warn) == 1
+    assert "가동률" in sent_warn[0]
+    assert "market_regime: KOSDAQ 5일 -6.90%" in sent_warn[0]
+    assert not client.submit_calls
+
+
+def test_all_entries_skipped_warns_only_once_per_day(monkeypatch):
+    """경계: 같은 날 11틱이 돌아도 하루 1회 — 마커 규약은 이 갈래에도 적용된다."""
+    monkeypatch.setattr("src.orchestrator.cash_deploy._KIS_GAP_SEC", 0)
+    _stub_select_entries(monkeypatch, plans=[], skips=[_skip()])
+
+    repo = FakeRepo()
+    client = FakeClient(balance=_balance(cash=25_000_000, total_eval=30_000_000), deposit=25_000_000)
+    sent_info, send_info = _noop_send()
+    sent_warn, send_warning = _noop_send()
+
+    for _ in range(11):
+        run_cash_deploy(client, repo, _rules(), [_candidate()], {}, send_info, send_warning)
+
+    assert len(sent_warn) == 1
+
+
+def test_all_entries_skipped_does_not_warn_when_utilization_healthy(monkeypatch):
+    """경계: 진입 0건이어도 가동률이 임계 위면 경고하지 않는다 (알림 피로 방지)."""
+    monkeypatch.setattr("src.orchestrator.cash_deploy._KIS_GAP_SEC", 0)
+    _stub_select_entries(monkeypatch, plans=[], skips=[_skip()])
+
+    repo = FakeRepo()
+    client = FakeClient(
+        balance=_balance(cash=5_000_000, total_eval=30_000_000, positions=[{"eval_amt": 25_000_000}]),
+        deposit=5_000_000,
+    )
+    sent_info, send_info = _noop_send()
+    sent_warn, send_warning = _noop_send()
+
+    n = run_cash_deploy(client, repo, _rules(cash_deploy_underrun_warn_pct=70.0),
+                        [_candidate()], {}, send_info, send_warning)
+
+    assert n == 0
+    assert sent_warn == []
 
 
 def test_get_deposit_exception_falls_back_to_balance_cash(monkeypatch):
