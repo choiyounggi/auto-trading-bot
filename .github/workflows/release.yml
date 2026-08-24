@@ -31,6 +31,7 @@ jobs:
         run: npm ci
 
       - name: Create Release Pull Request or Tag
+        id: changesets
         uses: changesets/action@v1
         with:
           version: npm run version
@@ -39,3 +40,21 @@ jobs:
           title: "chore: version packages"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # changesets/action 은 publish 명령의 표준출력을 파싱해 '퍼블리시된 패키지'가
+      # 있을 때만 태그를 push 한다. publish 가 `changeset tag` 라 퍼블리시는 0건이고,
+      # 액션은 push 를 건너뛴 채 초록불로 끝난다(v0.5.1, run 32702276773). 태그를
+      # 여기서 직접 민다 — 액션의 퍼블리시 판단과 무관하게 항상.
+      # 태그가 없는 실행(버전 PR 생성)에서는 Everything up-to-date 로 no-op.
+      - name: Push release tags
+        run: git push origin --tags
+
+      # 위 push 가 '조용히 아무것도 안 하는' 경우를 종료코드로 드러낸다.
+      # hasChangesets == 'false' 인 실행 = 퍼블리시 실행 = 태그가 있어야 하는 실행.
+      # ls-remote --exit-code 는 매칭 ref 가 없으면 2 로 끝나 잡을 빨간불로 만든다.
+      - name: Verify release tag reached the remote
+        if: steps.changesets.outputs.hasChangesets == 'false'
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "expecting tag v${version} on origin"
+          git ls-remote --exit-code --tags origin "refs/tags/v${version}"
