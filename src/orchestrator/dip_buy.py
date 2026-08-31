@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import date
 from typing import Any, Callable
+
+from src.notify.order_reject import warn_order_reject
 
 # KIS 모의투자 API는 초당 거래건수 제한이 있어 연속 호출 사이에 간격을 둔다.
 _KIS_GAP_SEC = 1.1
@@ -134,7 +137,8 @@ def run_dip_buy(
                     # 시간외/휴장 거부는 정상 — 경고 없이 조용히 skip(로그만).
                     log.info("dip-buy %s: 정규장 시간 아님으로 skip (%s)", etf, reason)
                 else:
-                    send_warning(f"줍줍 주문 거부 {etf}: {reason}")
+                    warn_order_reject(f"줍줍 주문 거부 {etf}: {reason}",
+                                      send_warning, date.today().isoformat())
                 break
             stop_loss = int(price * (1 - sl_pct / 100.0))
             take_profit = int(price * (1 + tp_pct / 100.0))
