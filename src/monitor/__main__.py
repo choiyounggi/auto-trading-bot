@@ -17,7 +17,7 @@ import sys
 from functools import lru_cache
 
 import requests
-from datetime import datetime, time
+from datetime import date, datetime, time
 from pathlib import Path
 
 from src.broker.kis_client import KisClient
@@ -26,6 +26,7 @@ from src.guardrails.rules import load_rules
 from src.monitor.dynamic_decision import decide_monitor
 from src.monitor.enforcement import evaluate_exits, held_qty, plan_partial_take_profit
 from src.monitor.trailing import maybe_activate_trailing, update_trailing_high
+from src.notify.order_reject import warn_order_reject
 from src.notify.telegram import send_critical, send_info, send_warning
 from src.storage.repository import Repo
 from src.util.keychain import load_kis_keys, load_telegram_keys
@@ -48,6 +49,11 @@ REGULAR_START = time(9, 0)
 REGULAR_END = time(15, 30)
 US_REGULAR_START_KST = time(22, 30)
 US_REGULAR_END_KST = time(6, 0)
+
+
+def _warn_reject(message: str) -> None:
+    """주문 거부 경고 — 같은 문구는 하루 한 번만 나간다 (src/notify/order_reject.py)."""
+    warn_order_reject(message, send_warning, date.today().isoformat())
 
 
 def _is_kr_regular_session(now: datetime) -> bool:
@@ -262,7 +268,7 @@ def run() -> int:
                             f"매도가: {sell_label}"
                         )
                     else:
-                        send_warning(f"해외 리스크 청산 주문 거부 {pos.name}: {order.raw.get('msg1', '')}")
+                        _warn_reject(f"해외 리스크 청산 주문 거부 {pos.name}: {order.raw.get('msg1', '')}")
                     continue
 
             # 2. 결정론적 강제 청산 우선
@@ -288,7 +294,7 @@ def run() -> int:
                                 + (f", 손절 본전 상향 {plan.new_stop_loss:,}" if plan.new_stop_loss else "")
                             )
                         else:
-                            send_warning(f"부분 익절 주문 거부 {pos.name}: {order.raw.get('msg1', '')}")
+                            _warn_reject(f"부분 익절 주문 거부 {pos.name}: {order.raw.get('msg1', '')}")
                         continue
                 log.warning("강제 청산 트리거: %s reason=%s @ %d",
                             exit_trigger.ticker, exit_trigger.reason, quote.current_price)
@@ -302,7 +308,7 @@ def run() -> int:
                         f"매도가: {sell_label} (현재가 {_price_label(quote.current_price, overseas_meta) if overseas_meta else _price_label(quote.current_price)})"
                     )
                 else:
-                    send_warning(f"청산 주문 거부 {pos.name}: {order.raw.get('msg1', '')}")
+                    _warn_reject(f"청산 주문 거부 {pos.name}: {order.raw.get('msg1', '')}")
                 continue
 
             # llm_mode False면 enforcement만 수행, LLM 호출 skip
@@ -367,7 +373,7 @@ def run() -> int:
                         f"매도가: {sell_label}"
                     )
                 else:
-                    send_warning(f"LLM_CLOSE 주문 거부 {pos.name}")
+                    _warn_reject(f"LLM_CLOSE 주문 거부 {pos.name}: {order.raw.get('msg1', '')}")
 
     return 0
 

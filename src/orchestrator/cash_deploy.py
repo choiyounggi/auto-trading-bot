@@ -22,6 +22,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Callable
 
+from src.notify.order_reject import warn_order_reject
 from src.orchestrator.capital import compute_capital_plan, position_eval_won
 from src.orchestrator.dip_buy import _KIS_GAP_SEC, is_market_closed_reject
 from src.orchestrator.entry_decision import AccountSnapshot, _asset_class, select_entries
@@ -267,7 +268,8 @@ def run_cash_deploy(
             if is_market_closed_reject(msg):
                 log.info("재배치 %s: 정규장 시간 아님으로 skip (%s)", p.ticker, msg)
             else:
-                send_warning(f"재배치 주문 거부 {p.ticker} {p.name}: {msg}")
+                warn_order_reject(f"재배치 주문 거부 {p.ticker} {p.name}: {msg}",
+                                  send_warning, date.today().isoformat())
             continue
 
         pos_id = repo.insert_position(

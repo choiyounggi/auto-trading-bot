@@ -660,6 +660,31 @@ def test_submit_buy_non_market_closed_reject_warns(monkeypatch):
     assert len(sent_warn) == 1
 
 
+def test_repeated_ticks_warn_once_for_the_same_reject(monkeypatch):
+    """차단기 배선 확인 — 계좌가 죽어 있으면 30분 틱마다 같은 문구가 나온다.
+    2026-08-28 이 사유로 재배치 경고만 33건이 쌓였다."""
+    monkeypatch.setattr(entry_mod, "vote_entry", _fake_vote(entry_price=10_000, size_pct=1.0))
+    monkeypatch.setattr("src.orchestrator.cash_deploy._KIS_GAP_SEC", 0)
+
+    sent_info, send_info = _noop_send()
+    sent_warn, send_warning = _noop_send()
+
+    for _ in range(5):
+        client = FakeClient(
+            balance=_balance(cash=25_000_000, total_eval=30_000_000),
+            deposit=25_000_000,
+            submit_accept=False,
+            submit_msg1="모의투자 주문이 불가한 계좌입니다.",
+        )
+        assert run_cash_deploy(
+            client, FakeRepo(), _rules(), [_candidate(score=9)], {}, send_info, send_warning,
+        ) == 0
+        assert client.submit_calls, "주문 재시도까지 막으면 안 된다 — 억제 대상은 알림뿐"
+
+    assert len(sent_warn) == 1
+    assert "모의투자 주문이 불가한 계좌입니다." in sent_warn[0]
+
+
 def test_overseas_candidates_produce_no_orders(monkeypatch):
     monkeypatch.setattr(entry_mod, "vote_entry", _fake_vote())
     monkeypatch.setattr("src.orchestrator.cash_deploy._KIS_GAP_SEC", 0)
