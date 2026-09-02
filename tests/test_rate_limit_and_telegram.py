@@ -224,3 +224,59 @@ def test_telegram_noop_without_credentials(monkeypatch):
     monkeypatch.setattr(telegram.requests, "post", lambda *a, **k: called.append(1))
     assert telegram.send("메시지") is False
     assert called == []
+
+
+# ============================================================
+# telegram — 뮤트 플래그 (data/telegram_muted)
+# ============================================================
+
+def test_telegram_muted_when_flag_exists(monkeypatch, tmp_path):
+    _patch_credentials(monkeypatch)
+    flag = tmp_path / "telegram_muted"
+    flag.touch()
+    monkeypatch.setattr(telegram, "MUTE_FLAG", flag)
+    called = []
+    monkeypatch.setattr(telegram.requests, "post", lambda *a, **k: called.append(1))
+    assert telegram.send("메시지") is False
+    assert called == []                     # 자격증명이 있어도 전송 안 함
+
+
+def test_telegram_sends_when_flag_absent(monkeypatch, tmp_path):
+    _patch_credentials(monkeypatch)
+    monkeypatch.setattr(telegram, "MUTE_FLAG", tmp_path / "no_such_flag")
+    payloads = []
+
+    def fake_post(url, json=None, timeout=None):
+        payloads.append(json)
+        return _TgResp(200)
+
+    monkeypatch.setattr(telegram.requests, "post", fake_post)
+    assert telegram.send("메시지") is True
+    assert len(payloads) == 1
+
+
+def test_signal_telegram_bot_muted_when_flag_exists(monkeypatch, tmp_path):
+    from src.signal.notify import telegram_bot
+
+    flag = tmp_path / "telegram_muted"
+    flag.touch()
+    monkeypatch.setattr(telegram_bot, "MUTE_FLAG", flag)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
+    called = []
+    monkeypatch.setattr(telegram_bot.requests, "post", lambda *a, **k: called.append(1))
+    out = telegram_bot.send_message("메시지")
+    assert out == {"ok": False, "muted": True}
+    assert called == []
+
+
+def test_signal_telegram_bot_raises_without_token_when_flag_absent(monkeypatch, tmp_path):
+    from src.signal.notify import telegram_bot
+
+    monkeypatch.setattr(telegram_bot, "MUTE_FLAG", tmp_path / "no_such_flag")
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    import pytest
+
+    with pytest.raises(RuntimeError):       # 뮤트 아님 → 기존 동작 유지
+        telegram_bot.send_message("메시지")

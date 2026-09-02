@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -10,6 +11,10 @@ import requests
 log = logging.getLogger(__name__)
 
 API_BASE = "https://api.telegram.org"
+
+# src/notify/telegram.py 의 MUTE_FLAG 와 같은 파일. 이식 트리는 src.notify 를
+# import 할 수 없어서(test_vendored_port) 경로를 인라인으로 둔다.
+MUTE_FLAG = Path("data/telegram_muted")
 
 
 def _token_chat() -> tuple[str, str]:
@@ -23,6 +28,9 @@ def _token_chat() -> tuple[str, str]:
 
 
 def send_message(text: str, parse_mode: Optional[str] = "Markdown") -> dict:
+    if MUTE_FLAG.exists():
+        log.info("[telegram muted] %s", text[:200])
+        return {"ok": False, "muted": True}
     token, chat = _token_chat()
     url = f"{API_BASE}/bot{token}/sendMessage"
     payload = {"chat_id": chat, "text": text}
