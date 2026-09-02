@@ -3,12 +3,17 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 import requests
 
 from src.util.keychain import keychain_get
 
 log = logging.getLogger(__name__)
+
+# 이 파일이 존재하면 모든 알림을 전송하지 않는다 (log only).
+# launchd 잡의 WorkingDirectory가 프로젝트 루트라 상대 경로로 충분하다.
+MUTE_FLAG = Path("data/telegram_muted")
 
 SEVERITY_PREFIX = {
     "critical": "🚨",
@@ -36,6 +41,10 @@ def send(message: str, severity: str = "info", parse_mode: str = "Markdown") -> 
     token, chat_id = _get_credentials()
     prefix = SEVERITY_PREFIX.get(severity, "")
     body = f"{prefix} {message}" if prefix else message
+
+    if MUTE_FLAG.exists():
+        log.info("[telegram muted] %s", body[:200])
+        return False
 
     if not token or not chat_id:
         log.info("[telegram noop] %s", body[:200])
